@@ -1,0 +1,423 @@
+import type {
+  LlmceptionConfig,
+  StreamEvent,
+  InterceptedQuestion,
+  AnswerOption,
+  ExecuteOpts,
+  ForkOpts,
+  TokenUsage,
+} from "../types.js";
+import { DecisionTree } from "../tree/tree.js";
+import { TreeNode } from "../tree/node.js";
+import { TreeSerializer } from "../tree/serializer.js";
+import { WorktreeManager } from "../git/worktree.js";
+import { CostTracker } from "../cost/tracker.js";
+import { ContextBuilder } from "../forker/context-builder.js";
+import { OptionExtractor } from "../interceptor/option-extractor.js";
+import { ProviderRegistry } from "../providers/registry.js";
+import { ProcessPool } from "./process-pool.js";
+import { logger } from "../util/logger.js";
+
+type ProgressCallback = (tree: DecisionTree) => void;
+
+/**
+ * The core orchestrator that drives the entire decision-tree exploration.
+ *
+ * Flow:
+ * 1. Creates a root node and starts execution with the task prompt
+ * 2. When a question is detected (ask_user event):
+ *    - Records the question on the current node
+ *    - Snapshots git state
+ *    - Creates child nodes for each answer option
+ *    - Submits fork/execute jobs for each child to the ProcessPool
+ * 3. When depth >= maxDepth, auto-resolves with the first option
+ * 4. Continues until all nodes are terminal (completed/failed/pruned)
+ */
+export class Orchestrator {
+  private config: LlmceptionConfig;
+  private tree!: DecisionTree;
+  private worktreeManager!: WorktreeManager;
+  private costTracker!: CostTracker;
+  private pool!: ProcessPool;
+  private progressCallbacks: ProgressCallback[] = [];
+
+  /** Maps processId -> nodeId for event routing */
+  private processNodeMap: Map<string, string> = new Map();
+  /** Maps nodeId -> accumulated text for the node */
+  private nodeText: Map<string, string> = new Map();
+  /** Track which nodes have pending work remaining */
+  private pendingNodes: Set<string> = new Set();
+  /** Resolve function for the main exploration promise */
+  private resolveExplore: (() => void) | null = null;
+
+  constructor(config: LlmceptionConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Register a callback that fires on significant tree state changes.
+   */
+  onProgress(callback: ProgressCallback): void {
+    this.progressCallbacks.push(callback);
+  }
+
+  /**
+   * Main entry point: explore all decision branches for a given task.
+   *
+   * Creates the decision tree, starts root execution, and returns the
+   * fully explored tree once all nodes have reached a terminal state.
+   */
+  async explore(task: string, cwd: string): Promise<DecisionTree> {
+    // Initialize infrastructure
+    this.tree = new DecisionTree(task, this.config);
+    this.worktreeManager = new WorktreeManager(cwd);
+    this.costTracker = new CostTracker(this.config);
+    const provider = ProviderRegistry.create(this.config);
+    this.pool = new ProcessPool(this.config, provider);
+
+    // Ensure .llmception directories are gitignored
+    await this.worktreeManager.ensureGitignore();
+
+    // Wire up pool event handlers
+    this.pool.onEvent((processId, event) => {
+      this.handleEvent(processId, event);
+    });
+    this.pool.onComplete((processId) => {
+      this.handleProcessComplete(processId);
+    });
+
+    // Create and start root node
+    const root = this.tree.createRoot();
+    root.setStatus("running");
+    this.emitProgress();
+
+    const rootProcessId = `proc-${root.id}`;
+    this.processNodeMap.set(rootProcessId, root.id);
+    this.nodeText.set(root.id, "");
+    this.pendingNodes.add(root.id);
+
+    const systemPrompt = ContextBuilder.buildSystemPrompt();
+    const executeOpts: ExecuteOpts = {
+      prompt: task,
+      cwd,
+      systemPrompt,
+      model: this.config.model,
+    };
+
+    this.pool.submit(rootProcessId, executeOpts, false);
+
+    // Wait until all nodes are done
+    await new Promise<void>((resolve) => {
+      this.resolveExplore = resolve;
+      // Check immediately in case there's nothing to do
+      this.checkDone();
+    });
+
+    // Persist tree state
+    await TreeSerializer.save(this.tree, cwd);
+
+    return this.tree;
+  }
+
+  /**
+   * Handle a stream event from a pool process.
+   */
+  private handleEvent(processId: string, event: StreamEvent): void {
+    const nodeId = this.processNodeMap.get(processId);
+    if (!nodeId) {
+      logger.warn(`Event from unknown process ${processId}`);
+      return;
+    }
+
+    const node = this.tree.getNode(nodeId);
+    if (!node) {
+      logger.warn(`Node ${nodeId} not found in tree`);
+      return;
+    }
+
+    switch (event.type) {
+      case "init":
+        this.handleInit(node, event.sessionId);
+        break;
+
+      case "text":
+        this.handleText(nodeId, event.text);
+        break;
+
+      case "tool_use":
+        // Tool use events are informational; the stream parser handles
+        // ask_user detection, so we just log here.
+        logger.debug(`[Node ${nodeId}] Tool use: ${event.name}`);
+        break;
+
+      case "ask_user":
+        this.handleAskUser(node, event.question);
+        break;
+
+      case "result":
+        this.handleResult(node, event);
+        break;
+
+      case "error":
+        this.handleError(node, event.message);
+        break;
+    }
+  }
+
+  private handleInit(node: TreeNode, sessionId: string): void {
+    node.setSessionId(sessionId);
+    logger.debug(`[Node ${node.id}] Session initialized: ${sessionId}`);
+  }
+
+  private handleText(nodeId: string, text: string): void {
+    const current = this.nodeText.get(nodeId) ?? "";
+    this.nodeText.set(nodeId, current + text);
+  }
+
+  private handleAskUser(node: TreeNode, question: InterceptedQuestion): void {
+    logger.info(`[Node ${node.id}] Question detected: ${question.header}`);
+
+    // Normalize options (cap at maxWidth)
+    const normalizedOptions = OptionExtractor.normalize(
+      question.options,
+      this.config.maxWidth,
+    );
+    const normalizedQuestion: InterceptedQuestion = {
+      ...question,
+      options: normalizedOptions,
+    };
+
+    node.setQuestion(normalizedQuestion);
+    this.emitProgress();
+
+    // Decide whether to fork or auto-resolve
+    if (node.depth < this.config.maxDepth && this.tree.canGrow()) {
+      this.forkNode(node, normalizedQuestion);
+    } else {
+      this.autoResolve(node, normalizedQuestion);
+    }
+  }
+
+  private handleResult(
+    node: TreeNode,
+    event: { costUsd: number; sessionId: string; tokenUsage: TokenUsage },
+  ): void {
+    node.setCost(event.tokenUsage);
+    this.costTracker.record(node.id, event.tokenUsage);
+
+    // Only mark completed if we haven't already set it to "questioned"
+    if (node.status === "running") {
+      node.setCompleted([], "");
+      logger.info(`[Node ${node.id}] Completed (cost: $${event.costUsd.toFixed(4)})`);
+    }
+
+    this.pendingNodes.delete(node.id);
+    this.emitProgress();
+    this.checkDone();
+  }
+
+  private handleError(node: TreeNode, message: string): void {
+    logger.error(`[Node ${node.id}] Error: ${message}`);
+    node.setFailed(message);
+    this.pendingNodes.delete(node.id);
+    this.emitProgress();
+    this.checkDone();
+  }
+
+  /**
+   * Fork a questioned node into child branches, one per answer option.
+   */
+  private forkNode(node: TreeNode, question: InterceptedQuestion): void {
+    node.setStatus("forking");
+    this.pendingNodes.delete(node.id);
+
+    const options = question.options;
+    if (options.length === 0) {
+      logger.warn(`[Node ${node.id}] Question has no options, marking completed`);
+      node.setCompleted([], "");
+      this.emitProgress();
+      this.checkDone();
+      return;
+    }
+
+    const provider = ProviderRegistry.create(this.config);
+    const systemPrompt = ContextBuilder.buildSystemPrompt();
+
+    for (const option of options) {
+      if (!this.tree.canGrow()) {
+        logger.info(`[Node ${node.id}] Node budget exhausted, stopping fork`);
+        break;
+      }
+
+      const child = this.tree.addChild(node.id, option);
+      child.setStatus("running");
+      this.pendingNodes.add(child.id);
+      this.nodeText.set(child.id, "");
+
+      const childProcessId = `proc-${child.id}`;
+      this.processNodeMap.set(childProcessId, child.id);
+
+      // Build the prompt/opts for the child
+      const childOpts = this.buildChildOpts(
+        node,
+        child,
+        option,
+        question,
+        systemPrompt,
+      );
+
+      // Determine if this is a fork (native resume) or a fresh execute
+      const isFork = provider.supportsFork && node.sessionId !== null;
+
+      this.pool.submit(childProcessId, childOpts, isFork);
+    }
+
+    this.emitProgress();
+    this.checkDone();
+  }
+
+  /**
+   * Auto-resolve a question by picking the first option and continuing.
+   * Used when depth >= maxDepth.
+   */
+  private autoResolve(node: TreeNode, question: InterceptedQuestion): void {
+    logger.info(`[Node ${node.id}] Auto-resolving at depth ${node.depth}`);
+
+    const options = question.options;
+    if (options.length === 0) {
+      node.setCompleted([], "");
+      this.pendingNodes.delete(node.id);
+      this.emitProgress();
+      this.checkDone();
+      return;
+    }
+
+    const chosenOption = options[0];
+
+    if (!this.tree.canGrow()) {
+      // Budget exhausted — just mark completed
+      node.setStatus("auto-resolved");
+      this.pendingNodes.delete(node.id);
+      this.emitProgress();
+      this.checkDone();
+      return;
+    }
+
+    // Create a single child with the auto-resolved answer
+    const child = this.tree.addChild(node.id, chosenOption);
+    child.setStatus("running");
+    node.setStatus("auto-resolved");
+    this.pendingNodes.delete(node.id);
+    this.pendingNodes.add(child.id);
+    this.nodeText.set(child.id, "");
+
+    const childProcessId = `proc-${child.id}`;
+    this.processNodeMap.set(childProcessId, child.id);
+
+    const provider = ProviderRegistry.create(this.config);
+    const systemPrompt = ContextBuilder.buildSystemPrompt();
+
+    const childOpts = this.buildChildOpts(
+      node,
+      child,
+      chosenOption,
+      question,
+      systemPrompt,
+    );
+
+    const isFork = provider.supportsFork && node.sessionId !== null;
+    this.pool.submit(childProcessId, childOpts, isFork);
+
+    this.emitProgress();
+  }
+
+  /**
+   * Build execution options for a child node.
+   */
+  private buildChildOpts(
+    parent: TreeNode,
+    child: TreeNode,
+    option: AnswerOption,
+    question: InterceptedQuestion,
+    systemPrompt: string,
+  ): ExecuteOpts | ForkOpts {
+    const answerPrompt = ContextBuilder.buildAnswerPrompt(question, option);
+    const cwd = child.worktreePath ?? parent.worktreePath ?? this.worktreeManager.getRepoRoot();
+
+    const provider = ProviderRegistry.create(this.config);
+
+    if (provider.supportsFork && parent.sessionId) {
+      // Use native session forking
+      const forkOpts: ForkOpts = {
+        prompt: answerPrompt,
+        cwd,
+        systemPrompt,
+        model: this.config.model,
+        parentSessionId: parent.sessionId,
+      };
+      return forkOpts;
+    }
+
+    // Fresh execution with full context replay
+    const task = this.tree.getTask();
+    const fullPrompt = ContextBuilder.buildFullPrompt(
+      task,
+      [...child.decisionPath],
+    );
+
+    const executeOpts: ExecuteOpts = {
+      prompt: fullPrompt,
+      cwd,
+      systemPrompt,
+      model: this.config.model,
+    };
+    return executeOpts;
+  }
+
+  /**
+   * Called when a pool process finishes (whether by completion or error).
+   */
+  private handleProcessComplete(processId: string): void {
+    const nodeId = this.processNodeMap.get(processId);
+    if (!nodeId) return;
+
+    // If the node is still marked as running (no result/error event came),
+    // treat it as a failure
+    const node = this.tree.getNode(nodeId);
+    if (node && node.status === "running") {
+      node.setFailed("Process ended without result");
+      this.pendingNodes.delete(nodeId);
+      this.emitProgress();
+    }
+
+    this.checkDone();
+  }
+
+  /**
+   * Check if exploration is complete (no pending nodes or running processes).
+   */
+  private checkDone(): void {
+    if (
+      this.pendingNodes.size === 0 &&
+      this.pool.getRunningCount() === 0 &&
+      this.pool.getPendingCount() === 0
+    ) {
+      if (this.resolveExplore) {
+        const resolve = this.resolveExplore;
+        this.resolveExplore = null;
+        resolve();
+      }
+    }
+  }
+
+  private emitProgress(): void {
+    for (const cb of this.progressCallbacks) {
+      try {
+        cb(this.tree);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Progress callback error: ${msg}`);
+      }
+    }
+  }
+}
