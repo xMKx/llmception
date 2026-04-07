@@ -123,9 +123,23 @@ export class Orchestrator {
       this.handleProcessComplete(processId);
     });
 
-    // Create and start root node
+    // Create and start root node in its own worktree
     const root = this.tree.createRoot();
     root.setStatus("running");
+
+    // Root gets its own worktree so changes are tracked and `apply` works
+    try {
+      const { worktreePath, branchName } = await this.worktreeManager.create(
+        root.id,
+        this.tree.toState().id,
+      );
+      root.setWorktree(worktreePath, branchName);
+    } catch (err: unknown) {
+      // If worktree creation fails (e.g. not a git repo), run in cwd directly
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`Could not create worktree for root, running in cwd: ${msg}`);
+    }
+
     this.emitActivity({
       type: "node_started",
       nodeId: root.id,
@@ -140,9 +154,10 @@ export class Orchestrator {
     this.pendingNodes.add(root.id);
 
     const systemPrompt = ContextBuilder.buildSystemPrompt();
+    const rootCwd = root.worktreePath ?? cwd;
     const executeOpts: ExecuteOpts = {
       prompt: task,
-      cwd,
+      cwd: rootCwd,
       systemPrompt,
       model: this.config.model,
     };

@@ -51,8 +51,8 @@ describe("DEFAULT_CONFIG", () => {
     expect(DEFAULT_CONFIG.model).toBe("sonnet");
   });
 
-  it("should have permissionMode as auto", () => {
-    expect(DEFAULT_CONFIG.permissionMode).toBe("auto");
+  it("should have permissionMode as bypassPermissions", () => {
+    expect(DEFAULT_CONFIG.permissionMode).toBe("bypassPermissions");
   });
 
   it("should have claudeCodePath as claude", () => {

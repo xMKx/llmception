@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG: LlmceptionConfig = {
   budget: { perBranchUsd: 5.0, totalUsd: 25.0, mode: "hard" },
   branchTimeoutMs: 300_000,
   model: "sonnet",
-  permissionMode: "auto",
+  permissionMode: "bypassPermissions",
   claudeCodePath: "claude",
   providers: {},
 };

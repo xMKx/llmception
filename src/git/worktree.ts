@@ -199,9 +199,18 @@ export class WorktreeManager {
   }
 
   /**
-   * Ensure .llmception-worktrees/ and .llmception/ are in .gitignore.
+   * Ensure the directory is a git repo and .llmception paths are in .gitignore.
+   * If not a git repo, initializes one with an initial commit.
    */
   async ensureGitignore(): Promise<void> {
+    // Ensure it's a git repo (needed for worktrees)
+    try {
+      await execGit(["rev-parse", "--git-dir"], this.repoRoot);
+    } catch {
+      logger.info("Not a git repository. Initializing one for worktree support...");
+      await execGit(["init"], this.repoRoot);
+    }
+
     const gitignorePath = join(this.repoRoot, ".gitignore");
     let content = "";
 
@@ -225,6 +234,15 @@ export class WorktreeManager {
       const newContent = content + suffix + toAdd.join("\n") + "\n";
       await writeFile(gitignorePath, newContent, "utf-8");
       logger.debug(`Added to .gitignore: ${toAdd.join(", ")}`);
+    }
+
+    // Ensure at least one commit exists (worktrees require a commit)
+    try {
+      await execGit(["rev-parse", "HEAD"], this.repoRoot);
+    } catch {
+      logger.info("No commits found. Creating initial commit for worktree support...");
+      await execGit(["add", ".gitignore"], this.repoRoot);
+      await execGit(["commit", "-m", "Initial commit (llmception)"], this.repoRoot);
     }
   }
 
