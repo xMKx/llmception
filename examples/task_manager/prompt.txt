@@ -1,0 +1,2 @@
+build a full-stack task management app with user authentication,   
+  real-time collaboration, and a REST API

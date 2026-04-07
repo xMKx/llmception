@@ -1,0 +1,7 @@
+node_modules/
+.llmception/
+.llmception-worktrees/
+*.db
+*.db-shm
+*.db-wal
+package-lock.json
