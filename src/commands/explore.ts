@@ -89,9 +89,9 @@ function formatActivityLine(event: ActivityEvent, isSubscription: boolean): stri
     case "node_started":
       return `${chalk.blue("START")} ${prefix} ${chalk.dim(event.detail ?? "")}`;
     case "node_completed": {
-      const cost = event.detail ?? "";
-      const costStr = isSubscription ? chalk.dim(`~${cost} equiv.`) : chalk.green(cost);
-      return `${chalk.green("DONE")}  ${prefix} ${costStr}`;
+      const detail = event.detail ?? "";
+      const detailStr = isSubscription ? chalk.dim(detail) : chalk.green(detail);
+      return `${chalk.green("DONE")}  ${prefix} ${detailStr}`;
     }
     case "node_failed":
       return `${chalk.red("FAIL")}  ${prefix} ${chalk.red(event.detail ?? "")}`;
@@ -175,10 +175,12 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
     if (stats.pendingNodes > 0) parts.push(chalk.dim(`${stats.pendingNodes} pending`));
     if (stats.failedNodes > 0) parts.push(chalk.red(`${stats.failedNodes} failed`));
 
-    const costStr = formatCostLabel(stats.totalCostUsd, isSubscription);
     const tokenStr = chalk.dim(formatTokens(stats.totalInputTokens, stats.totalOutputTokens));
     const elapsed = formatElapsed(startTime);
-    const newLine = `${chalk.dim("---")} ${parts.join(chalk.dim(" | "))} ${chalk.dim("|")} ${costStr} ${chalk.dim("|")} ${tokenStr} ${chalk.dim(`| ${elapsed}`)}`;
+    const costPart = !isSubscription
+      ? `${chalk.dim("|")} ${formatCostLabel(stats.totalCostUsd, isSubscription)} `
+      : "";
+    const newLine = `${chalk.dim("---")} ${parts.join(chalk.dim(" | "))} ${costPart}${chalk.dim("|")} ${tokenStr} ${chalk.dim(`| ${elapsed}`)}`;
 
     // Only print if changed (avoid spamming identical lines)
     if (newLine !== lastProgressLine) {

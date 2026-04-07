@@ -276,12 +276,14 @@ export class Orchestrator {
     // Only mark completed if we haven't already set it to "questioned"
     if (node.status === "running") {
       node.setCompleted([], "");
-      logger.info(`[Node ${node.id}] Completed (cost: $${event.costUsd.toFixed(4)})`);
+      const totalTokens = event.tokenUsage.inputTokens + event.tokenUsage.outputTokens;
+      const tokenStr = totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : String(totalTokens);
+      logger.info(`[Node ${node.id}] Completed (${tokenStr} tokens, $${event.costUsd.toFixed(4)})`);
       this.emitActivity({
         type: "node_completed",
         nodeId: node.id,
         label: this.getNodeLabel(node),
-        detail: `$${event.costUsd.toFixed(4)}`,
+        detail: `${tokenStr} tokens`,
       });
     }
 

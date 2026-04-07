@@ -67,7 +67,7 @@ export class TreeDisplay {
    * Render an ASCII tree visualisation.
    * Each node shows: [status] label (cost) with tree lines.
    */
-  static formatTree(tree: DecisionTree): string {
+  static formatTree(tree: DecisionTree, pricing?: PricingModel): string {
     const state = tree.toState();
     if (!state.rootId) return chalk.dim("(empty tree)");
 
@@ -94,7 +94,14 @@ export class TreeDisplay {
       }
 
       const statusStr = colourStatus(ns.status);
-      const costStr = ns.costUsd > 0 ? ` ${formatCost(ns.costUsd)}` : "";
+      let costStr = "";
+      if (pricing === "metered" && ns.costUsd > 0) {
+        costStr = ` ${formatCost(ns.costUsd, pricing)}`;
+      } else if (ns.tokenUsage.inputTokens + ns.tokenUsage.outputTokens > 0) {
+        const total = ns.tokenUsage.inputTokens + ns.tokenUsage.outputTokens;
+        const fmt = total >= 1000 ? `${(total / 1000).toFixed(1)}k` : String(total);
+        costStr = chalk.dim(` ${fmt} tokens`);
+      }
       const diffStr = ns.diffStat ? chalk.dim(` ${ns.diffStat}`) : "";
       const errorStr = ns.error
         ? chalk.red(` err: ${truncate(ns.error, 30)}`)
@@ -143,9 +150,7 @@ export class TreeDisplay {
     lines.push(`  Max depth: ${stats.maxDepthReached}`);
 
     const tokenSummary = formatTokenCount(stats.totalInputTokens, stats.totalOutputTokens);
-    if (pricing && pricing !== "metered") {
-      lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)} ${chalk.dim("(subscription — no actual charge)")}`);
-    } else {
+    if (pricing === "metered") {
       lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)}`);
     }
     lines.push(`  Tokens: ${tokenSummary}`);
