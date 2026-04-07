@@ -8,6 +8,7 @@ export { QuestionDetector } from "./interceptor/question-detector.js";
 export { OptionExtractor } from "./interceptor/option-extractor.js";
 export { ProcessPool } from "./runner/process-pool.js";
 export { Orchestrator } from "./runner/orchestrator.js";
+export type { ActivityEvent } from "./runner/orchestrator.js";
 export { WorktreeManager } from "./git/worktree.js";
 export { CostTracker } from "./cost/tracker.js";
 export { loadConfig, DEFAULT_CONFIG } from "./config/schema.js";

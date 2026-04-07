@@ -20,6 +20,16 @@ import { logger } from "../util/logger.js";
 
 type ProgressCallback = (tree: DecisionTree) => void;
 
+/** Detailed activity event for UI display */
+export interface ActivityEvent {
+  type: "node_started" | "node_completed" | "node_failed" | "question_detected" | "forking" | "auto_resolving" | "tool_use";
+  nodeId: string;
+  label: string;
+  detail?: string;
+}
+
+type ActivityCallback = (event: ActivityEvent) => void;
+
 /**
  * The core orchestrator that drives the entire decision-tree exploration.
  *
@@ -40,6 +50,7 @@ export class Orchestrator {
   private costTracker!: CostTracker;
   private pool!: ProcessPool;
   private progressCallbacks: ProgressCallback[] = [];
+  private activityCallbacks: ActivityCallback[] = [];
 
   /** Maps processId -> nodeId for event routing */
   private processNodeMap: Map<string, string> = new Map();
@@ -59,6 +70,32 @@ export class Orchestrator {
    */
   onProgress(callback: ProgressCallback): void {
     this.progressCallbacks.push(callback);
+  }
+
+  /**
+   * Register a callback for detailed activity events (tool use, questions, forks).
+   */
+  onActivity(callback: ActivityCallback): void {
+    this.activityCallbacks.push(callback);
+  }
+
+  /**
+   * Get the current tree (for external access during exploration).
+   */
+  getTree(): DecisionTree | undefined {
+    return this.tree;
+  }
+
+  /**
+   * Gracefully stop exploration: kills running processes, saves tree state.
+   */
+  async stop(cwd: string): Promise<void> {
+    if (this.pool) {
+      this.pool.stop();
+    }
+    if (this.tree) {
+      await TreeSerializer.save(this.tree, cwd);
+    }
   }
 
   /**
@@ -89,6 +126,12 @@ export class Orchestrator {
     // Create and start root node
     const root = this.tree.createRoot();
     root.setStatus("running");
+    this.emitActivity({
+      type: "node_started",
+      nodeId: root.id,
+      label: "ROOT",
+      detail: task,
+    });
     this.emitProgress();
 
     const rootProcessId = `proc-${root.id}`;
@@ -145,9 +188,13 @@ export class Orchestrator {
         break;
 
       case "tool_use":
-        // Tool use events are informational; the stream parser handles
-        // ask_user detection, so we just log here.
         logger.debug(`[Node ${nodeId}] Tool use: ${event.name}`);
+        this.emitActivity({
+          type: "tool_use",
+          nodeId,
+          label: this.getNodeLabel(node),
+          detail: event.name,
+        });
         break;
 
       case "ask_user":
@@ -176,6 +223,12 @@ export class Orchestrator {
 
   private handleAskUser(node: TreeNode, question: InterceptedQuestion): void {
     logger.info(`[Node ${node.id}] Question detected: ${question.header}`);
+    this.emitActivity({
+      type: "question_detected",
+      nodeId: node.id,
+      label: this.getNodeLabel(node),
+      detail: `${question.header} (${question.options.length} options)`,
+    });
 
     // Normalize options (cap at maxWidth)
     const normalizedOptions = OptionExtractor.normalize(
@@ -209,6 +262,12 @@ export class Orchestrator {
     if (node.status === "running") {
       node.setCompleted([], "");
       logger.info(`[Node ${node.id}] Completed (cost: $${event.costUsd.toFixed(4)})`);
+      this.emitActivity({
+        type: "node_completed",
+        nodeId: node.id,
+        label: this.getNodeLabel(node),
+        detail: `$${event.costUsd.toFixed(4)}`,
+      });
     }
 
     this.pendingNodes.delete(node.id);
@@ -218,6 +277,12 @@ export class Orchestrator {
 
   private handleError(node: TreeNode, message: string): void {
     logger.error(`[Node ${node.id}] Error: ${message}`);
+    this.emitActivity({
+      type: "node_failed",
+      nodeId: node.id,
+      label: this.getNodeLabel(node),
+      detail: message,
+    });
     node.setFailed(message);
     this.pendingNodes.delete(node.id);
     this.emitProgress();
@@ -230,6 +295,12 @@ export class Orchestrator {
   private forkNode(node: TreeNode, question: InterceptedQuestion): void {
     node.setStatus("forking");
     this.pendingNodes.delete(node.id);
+    this.emitActivity({
+      type: "forking",
+      nodeId: node.id,
+      label: this.getNodeLabel(node),
+      detail: `${question.options.length} branches: ${question.options.map(o => o.label).join(", ")}`,
+    });
 
     const options = question.options;
     if (options.length === 0) {
@@ -282,6 +353,12 @@ export class Orchestrator {
    */
   private autoResolve(node: TreeNode, question: InterceptedQuestion): void {
     logger.info(`[Node ${node.id}] Auto-resolving at depth ${node.depth}`);
+    this.emitActivity({
+      type: "auto_resolving",
+      nodeId: node.id,
+      label: this.getNodeLabel(node),
+      detail: `depth ${node.depth} >= maxDepth, picking "${question.options[0]?.label ?? "first"}"`,
+    });
 
     const options = question.options;
     if (options.length === 0) {
@@ -410,6 +487,12 @@ export class Orchestrator {
     }
   }
 
+  private getNodeLabel(node: TreeNode): string {
+    if (node.depth === 0) return "ROOT";
+    if (node.answer) return node.answer.label;
+    return `node-${node.id.slice(0, 8)}`;
+  }
+
   private emitProgress(): void {
     for (const cb of this.progressCallbacks) {
       try {
@@ -417,6 +500,17 @@ export class Orchestrator {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`Progress callback error: ${msg}`);
+      }
+    }
+  }
+
+  private emitActivity(event: ActivityEvent): void {
+    for (const cb of this.activityCallbacks) {
+      try {
+        cb(event);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Activity callback error: ${msg}`);
       }
     }
   }
