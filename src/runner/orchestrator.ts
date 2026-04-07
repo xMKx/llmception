@@ -260,9 +260,9 @@ export class Orchestrator {
 
     // Decide whether to fork or auto-resolve
     if (node.depth < this.config.maxDepth && this.tree.canGrow()) {
-      this.forkNode(node, normalizedQuestion);
+      void this.forkNode(node, normalizedQuestion);
     } else {
-      this.autoResolve(node, normalizedQuestion);
+      void this.autoResolve(node, normalizedQuestion);
     }
   }
 
@@ -306,8 +306,9 @@ export class Orchestrator {
 
   /**
    * Fork a questioned node into child branches, one per answer option.
+   * Each child gets its own worktree branched from the parent's current state.
    */
-  private forkNode(node: TreeNode, question: InterceptedQuestion): void {
+  private async forkNode(node: TreeNode, question: InterceptedQuestion): Promise<void> {
     node.setStatus("forking");
     this.pendingNodes.delete(node.id);
     this.emitActivity({
@@ -326,8 +327,23 @@ export class Orchestrator {
       return;
     }
 
+    // Snapshot parent state so each child branches from the same point
+    const parentWorktree = node.worktreePath ?? this.worktreeManager.getRepoRoot();
+    let snapshotCommit: string | undefined;
+    try {
+      snapshotCommit = await this.worktreeManager.snapshot(
+        parentWorktree,
+        `llmception: snapshot before fork at "${question.header}"`,
+      );
+      node.setCommit(snapshotCommit);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`Could not snapshot parent state: ${msg}`);
+    }
+
     const provider = ProviderRegistry.create(this.config);
     const systemPrompt = ContextBuilder.buildSystemPrompt();
+    const treeId = this.tree.toState().id;
 
     for (const option of options) {
       if (!this.tree.canGrow()) {
@@ -339,6 +355,19 @@ export class Orchestrator {
       child.setStatus("running");
       this.pendingNodes.add(child.id);
       this.nodeText.set(child.id, "");
+
+      // Create a worktree for this child
+      try {
+        const { worktreePath, branchName } = await this.worktreeManager.create(
+          child.id,
+          treeId,
+          snapshotCommit,
+        );
+        child.setWorktree(worktreePath, branchName);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`Could not create worktree for child ${child.id}: ${msg}`);
+      }
 
       const childProcessId = `proc-${child.id}`;
       this.processNodeMap.set(childProcessId, child.id);
@@ -366,7 +395,7 @@ export class Orchestrator {
    * Auto-resolve a question by picking the first option and continuing.
    * Used when depth >= maxDepth.
    */
-  private autoResolve(node: TreeNode, question: InterceptedQuestion): void {
+  private async autoResolve(node: TreeNode, question: InterceptedQuestion): Promise<void> {
     logger.info(`[Node ${node.id}] Auto-resolving at depth ${node.depth}`);
     this.emitActivity({
       type: "auto_resolving",
@@ -387,7 +416,6 @@ export class Orchestrator {
     const chosenOption = options[0];
 
     if (!this.tree.canGrow()) {
-      // Budget exhausted — just mark completed
       node.setStatus("auto-resolved");
       this.pendingNodes.delete(node.id);
       this.emitProgress();
@@ -402,6 +430,25 @@ export class Orchestrator {
     this.pendingNodes.delete(node.id);
     this.pendingNodes.add(child.id);
     this.nodeText.set(child.id, "");
+
+    // Create worktree for the child
+    const treeId = this.tree.toState().id;
+    try {
+      const parentWorktree = node.worktreePath ?? this.worktreeManager.getRepoRoot();
+      const snapshotCommit = await this.worktreeManager.snapshot(
+        parentWorktree,
+        `llmception: snapshot before auto-resolve at "${question.header}"`,
+      );
+      const { worktreePath, branchName } = await this.worktreeManager.create(
+        child.id,
+        treeId,
+        snapshotCommit,
+      );
+      child.setWorktree(worktreePath, branchName);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`Could not create worktree for auto-resolved child: ${msg}`);
+    }
 
     const childProcessId = `proc-${child.id}`;
     this.processNodeMap.set(childProcessId, child.id);

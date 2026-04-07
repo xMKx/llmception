@@ -259,8 +259,8 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
 
     const firstQ = tree.getFirstUnresolvedQuestion();
     if (firstQ) {
-      console.log(TreeDisplay.formatQuestion(firstQ.node, firstQ.question, tree));
-      console.log(chalk.bold('Run "llmception answer <option>" to choose.'));
+      console.log("");
+      console.log(chalk.bold('Next step: run "llmception answer" to pick your preferred implementation.'));
     } else {
       const leaves = tree.getCompletedLeaves();
       if (leaves.length === 1) {
@@ -269,8 +269,7 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
         console.log(chalk.dim('Run "llmception apply" to apply changes to your working tree.'));
       } else if (leaves.length > 1) {
         console.log("");
-        console.log(chalk.yellow(`${leaves.length} implementations completed.`));
-        console.log(chalk.dim('Run "llmception status --tree" to review, then "llmception answer <n>" to pick.'));
+        console.log(chalk.bold('Next step: run "llmception answer" to pick your preferred implementation.'));
       }
     }
   } catch (err: unknown) {
