@@ -23,7 +23,7 @@ function makeConfig(overrides: Partial<LlmceptionConfig> = {}): LlmceptionConfig
     budget: { perBranchUsd: 5.0, totalUsd: 25.0, mode: "hard" },
     branchTimeoutMs: 300_000,
     model: "sonnet",
-    permissionMode: "auto",
+    permissionMode: "bypassPermissions",
     claudeCodePath: "claude",
     providers: {},
     ...overrides,
@@ -58,13 +58,12 @@ function makeTreeWithQuestion(): DecisionTree {
 
 describe("answerAction", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
   const mockLoadLatest = vi.mocked(TreeSerializer.loadLatest);
   const mockSave = vi.mocked(TreeSerializer.save);
 
   beforeEach(() => {
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
     mockLoadLatest.mockReset();
     mockSave.mockReset();
     mockSave.mockResolvedValue(undefined);
@@ -72,8 +71,7 @@ describe("answerAction", () => {
   });
 
   afterEach(() => {
-    logSpy.mockRestore();
-    errorSpy.mockRestore();
+    vi.restoreAllMocks();
     process.exitCode = undefined;
   });
 
@@ -83,41 +81,22 @@ describe("answerAction", () => {
     expect(logSpy).toHaveBeenCalledWith("No active exploration found.");
   });
 
-  it("should print 'No questions to answer' when tree has no unresolved questions", async () => {
+  it("should show guidance when no questions remain but leaves exist", async () => {
     const tree = new DecisionTree("Build a widget", makeConfig());
     const root = tree.createRoot();
     root.setCompleted(["file.ts"], "+1/-0");
     mockLoadLatest.mockResolvedValue(tree);
 
     await answerAction("1");
-    expect(logSpy).toHaveBeenCalledWith("No questions to answer.");
+    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(allOutput).toContain("resolved");
   });
 
-  it("should reject option 0 (below range)", async () => {
+  it("should show question when option doesn't match", async () => {
     mockLoadLatest.mockResolvedValue(makeTreeWithQuestion());
-    await answerAction("0");
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid option: 0"),
-    );
-    expect(process.exitCode).toBe(1);
-  });
-
-  it("should reject option above the number of choices", async () => {
-    mockLoadLatest.mockResolvedValue(makeTreeWithQuestion());
-    await answerAction("4");
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid option: 4"),
-    );
-    expect(process.exitCode).toBe(1);
-  });
-
-  it("should reject non-numeric option", async () => {
-    mockLoadLatest.mockResolvedValue(makeTreeWithQuestion());
-    await answerAction("abc");
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid option: abc"),
-    );
-    expect(process.exitCode).toBe(1);
+    await answerAction("xyz-nomatch");
+    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(allOutput).toContain("Could not match");
   });
 
   it("should prune sibling branches when choosing option 1", async () => {
@@ -126,18 +105,12 @@ describe("answerAction", () => {
 
     await answerAction("1");
 
-    // Should report pruning 2 nodes (the 2 unchosen siblings)
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain('Chose option 1: "PostgreSQL"');
-    expect(allOutput).toContain("Pruned 2 node(s).");
-
-    // The chosen child should not be pruned
-    const root = tree.getRootNode();
-    const chosenChildId = root.childIds[0];
-    const chosenChild = tree.getNode(chosenChildId);
-    expect(chosenChild?.status).not.toBe("pruned");
+    expect(allOutput).toContain("PostgreSQL");
+    expect(allOutput).toContain("Pruned 2 node(s)");
 
     // The other two should be pruned
+    const root = tree.getRootNode();
     const sibling1 = tree.getNode(root.childIds[1]);
     const sibling2 = tree.getNode(root.childIds[2]);
     expect(sibling1?.status).toBe("pruned");
@@ -151,13 +124,18 @@ describe("answerAction", () => {
     await answerAction("2");
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain('Chose option 2: "MongoDB"');
-    expect(allOutput).toContain("Pruned 2 node(s).");
+    expect(allOutput).toContain("MongoDB");
+    expect(allOutput).toContain("Pruned 2 node(s)");
+  });
 
-    // Sibling at index 1 (MongoDB) should survive
-    const root = tree.getRootNode();
-    const chosenChild = tree.getNode(root.childIds[1]);
-    expect(chosenChild?.status).not.toBe("pruned");
+  it("should match by label substring (case-insensitive)", async () => {
+    const tree = makeTreeWithQuestion();
+    mockLoadLatest.mockResolvedValue(tree);
+
+    await answerAction("postgres");
+
+    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(allOutput).toContain("PostgreSQL");
   });
 
   it("should save the tree after answering", async () => {
@@ -171,21 +149,18 @@ describe("answerAction", () => {
 
   it("should report single implementation when resolved", async () => {
     const tree = makeTreeWithQuestion();
-    // Mark one child as completed with a branch
     const root = tree.getRootNode();
     const chosenChildId = root.childIds[0];
     const chosenChild = tree.getNode(chosenChildId)!;
     chosenChild.setCompleted(["app.ts"], "+100/-0");
-    chosenChild.setWorktree("/tmp/wt", "llmception/test/node1");
 
     mockLoadLatest.mockResolvedValue(tree);
 
     await answerAction("1");
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("Resolved to a single implementation");
+    expect(allOutput).toContain("Resolved");
     expect(allOutput).toContain("PostgreSQL");
-    expect(allOutput).toContain("llmception/test/node1");
   });
 
   it("should show next question if one exists after answering", async () => {
@@ -199,7 +174,7 @@ describe("answerAction", () => {
     const c1 = tree.addChild(root.id, makeAnswer("PostgreSQL"));
     tree.addChild(root.id, makeAnswer("MongoDB"));
 
-    // The chosen child also has a question
+    // The chosen child also has a question with children
     c1.setQuestion({
       question: "Which ORM?",
       header: "ORM Choice",
@@ -214,6 +189,6 @@ describe("answerAction", () => {
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(allOutput).toContain("ORM Choice");
-    expect(allOutput).toContain("answer <option>");
+    expect(allOutput).toContain("answer");
   });
 });

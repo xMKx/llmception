@@ -166,18 +166,23 @@ export class DecisionTree {
     return undefined;
   }
 
-  /** All nodes with status "questioned" */
+  /** All nodes that have a question and multiple non-pruned children (user hasn't picked yet) */
   getQuestionedNodes(): TreeNode[] {
     const result: TreeNode[] = [];
     for (const node of this.nodes.values()) {
-      if (node.status === "questioned") {
+      if (!node.question) continue;
+      // A node needs answering if it has multiple non-pruned children
+      const nonPrunedChildren = node.childIds
+        .map((id) => this.nodes.get(id))
+        .filter((c) => c && c.status !== "pruned");
+      if (nonPrunedChildren.length > 1) {
         result.push(node);
       }
     }
     return result;
   }
 
-  /** The shallowest node that has an unresolved question */
+  /** The shallowest node that has an unresolved question (multiple non-pruned children) */
   getFirstUnresolvedQuestion():
     | { node: TreeNode; question: InterceptedQuestion }
     | undefined {

@@ -242,12 +242,24 @@ describe("DecisionTree", () => {
       expect(tree.getQuestionedNodes()).toEqual([]);
     });
 
-    it("should return nodes with questioned status", () => {
+    it("should return nodes with a question and multiple non-pruned children", () => {
       const root = tree.createRoot();
       root.setQuestion(makeQuestion("Auth", ["OAuth2", "JWT"]));
+      // Need at least 2 non-pruned children for it to be "unresolved"
+      tree.addChild(root.id, makeAnswer("OAuth2"));
+      tree.addChild(root.id, makeAnswer("JWT"));
       const questioned = tree.getQuestionedNodes();
       expect(questioned).toHaveLength(1);
       expect(questioned[0].id).toBe(root.id);
+    });
+
+    it("should not return nodes with only one non-pruned child", () => {
+      const root = tree.createRoot();
+      root.setQuestion(makeQuestion("Auth", ["OAuth2", "JWT"]));
+      tree.addChild(root.id, makeAnswer("OAuth2"));
+      const c2 = tree.addChild(root.id, makeAnswer("JWT"));
+      c2.setStatus("pruned");
+      expect(tree.getQuestionedNodes()).toEqual([]);
     });
   });
 
@@ -259,32 +271,38 @@ describe("DecisionTree", () => {
 
     it("should return the shallowest questioned node", () => {
       const root = tree.createRoot();
-      root.setStatus("completed");
-      const c1 = tree.addChild(root.id, makeAnswer("A"));
-      const c2 = tree.addChild(root.id, makeAnswer("B"));
-      c1.setQuestion(makeQuestion("DB", ["Postgres", "MySQL"]));
-      c2.setQuestion(makeQuestion("Cache", ["Redis", "Memcached"]));
+      root.setQuestion(makeQuestion("Auth", ["OAuth2", "JWT", "Session"]));
+      // Create multiple non-pruned children
+      tree.addChild(root.id, makeAnswer("OAuth2"));
+      tree.addChild(root.id, makeAnswer("JWT"));
+      tree.addChild(root.id, makeAnswer("Session"));
 
       const result = tree.getFirstUnresolvedQuestion();
       expect(result).toBeDefined();
-      // Both at depth 1, should return one of them
-      expect(result!.node.depth).toBe(1);
-      expect(result!.question).toBeDefined();
+      expect(result!.node.depth).toBe(0);
+      expect(result!.question.header).toBe("Auth");
     });
 
     it("should prefer shallower node", () => {
       const root = tree.createRoot();
-      root.setStatus("completed");
+      root.setQuestion(makeQuestion("Top Q", ["A", "C"]));
       const c1 = tree.addChild(root.id, makeAnswer("A"));
-      c1.setStatus("completed");
-      const gc1 = tree.addChild(c1.id, makeAnswer("B"));
-      gc1.setQuestion(makeQuestion("Deep Q", ["X", "Y"]));
       const c2 = tree.addChild(root.id, makeAnswer("C"));
+
+      // c1 has its own question with children
+      c1.setQuestion(makeQuestion("Deep Q", ["X", "Y"]));
+      tree.addChild(c1.id, makeAnswer("X"));
+      tree.addChild(c1.id, makeAnswer("Y"));
+
+      // c2 has its own question with children
       c2.setQuestion(makeQuestion("Shallow Q", ["P", "Q"]));
+      tree.addChild(c2.id, makeAnswer("P"));
+      tree.addChild(c2.id, makeAnswer("Q"));
 
       const result = tree.getFirstUnresolvedQuestion();
-      expect(result!.node.depth).toBe(1);
-      expect(result!.question.header).toBe("Shallow Q");
+      // Root (depth 0) should be returned first since it has the top-level question
+      expect(result!.node.depth).toBe(0);
+      expect(result!.question.header).toBe("Top Q");
     });
   });
 
