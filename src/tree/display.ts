@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import type { InterceptedQuestion } from "../types.js";
+import type { InterceptedQuestion, PricingModel } from "../types.js";
 import { TreeNode } from "./node.js";
 import { DecisionTree } from "./tree.js";
 
@@ -33,9 +33,12 @@ function colourStatus(status: string): string {
   }
 }
 
-/** Format a cost value for display */
-function formatCost(usd: number): string {
+/** Format a cost value for display, with pricing context */
+function formatCost(usd: number, pricing?: PricingModel): string {
   if (usd === 0) return chalk.dim("$0.00");
+  if (pricing && pricing !== "metered") {
+    return chalk.dim(`~$${usd.toFixed(2)} equiv.`);
+  }
   return chalk.yellow(`$${usd.toFixed(4)}`);
 }
 
@@ -106,7 +109,7 @@ export class TreeDisplay {
   }
 
   /** Render a compact status summary */
-  static formatStatus(tree: DecisionTree): string {
+  static formatStatus(tree: DecisionTree, pricing?: PricingModel): string {
     const stats = tree.getStats();
     const state = tree.toState();
     const lines: string[] = [];
@@ -127,7 +130,12 @@ export class TreeDisplay {
       `  Completed leaves: ${chalk.green(String(stats.completedLeaves))}`,
     );
     lines.push(`  Max depth: ${stats.maxDepthReached}`);
-    lines.push(`  Total cost: ${formatCost(stats.totalCostUsd)}`);
+
+    if (pricing && pricing !== "metered") {
+      lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)} ${chalk.dim("(subscription — no actual charge)")}`);
+    } else {
+      lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)}`);
+    }
 
     if (stats.questionedNodes > 0) {
       lines.push(

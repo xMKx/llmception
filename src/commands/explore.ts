@@ -1,7 +1,8 @@
-import type { LlmceptionConfig, ProviderType } from "../types.js";
+import type { LlmceptionConfig, PricingModel, ProviderType } from "../types.js";
 import { loadConfig, mergeConfigs, validateConfig } from "../config/schema.js";
 import { Orchestrator } from "../runner/orchestrator.js";
 import { TreeDisplay } from "../tree/display.js";
+import { ProviderRegistry } from "../providers/registry.js";
 
 export interface ExploreOpts {
   depth?: string;
@@ -74,6 +75,8 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
 
   // 4. Create orchestrator
   const orchestrator = new Orchestrator(config);
+  const pricing: PricingModel = ProviderRegistry.getProviderInfo(config.provider).pricing;
+  const isSubscription = pricing !== "metered";
 
   // 5. Register progress callback
   orchestrator.onProgress((tree) => {
@@ -83,7 +86,10 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
     if (stats.completedNodes > 0) parts.push(`${stats.completedNodes} done`);
     if (stats.questionedNodes > 0) parts.push(`${stats.questionedNodes} questioned`);
     if (stats.pendingNodes > 0) parts.push(`${stats.pendingNodes} pending`);
-    console.error(`[llmception] ${parts.join(", ")} | $${stats.totalCostUsd.toFixed(4)}`);
+    const costLabel = isSubscription
+      ? `~$${stats.totalCostUsd.toFixed(2)} equiv.`
+      : `$${stats.totalCostUsd.toFixed(4)}`;
+    console.error(`[llmception] ${parts.join(", ")} | ${costLabel}`);
   });
 
   // 6. Explore
@@ -91,7 +97,7 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
   const tree = await orchestrator.explore(task, cwd);
 
   // 7. Print final status
-  console.log(TreeDisplay.formatStatus(tree));
+  console.log(TreeDisplay.formatStatus(tree, pricing));
 
   const firstQ = tree.getFirstUnresolvedQuestion();
   if (firstQ) {

@@ -19,6 +19,11 @@ function makeConfig(overrides: Partial<LlmceptionConfig> = {}): LlmceptionConfig
   };
 }
 
+/** Config with a metered provider where budgets are enforced */
+function makeMeteredConfig(overrides: Partial<LlmceptionConfig> = {}): LlmceptionConfig {
+  return makeConfig({ provider: "anthropic", ...overrides });
+}
+
 function makeUsage(costUsd: number): TokenUsage {
   return {
     inputTokens: 1000,
@@ -34,6 +39,26 @@ describe("CostTracker", () => {
 
   beforeEach(() => {
     tracker = new CostTracker(makeConfig());
+  });
+
+  describe("pricing awareness", () => {
+    it("should identify subscription providers as non-metered", () => {
+      const t = new CostTracker(makeConfig({ provider: "claude-cli" }));
+      expect(t.isMetered).toBe(false);
+      expect(t.pricing).toBe("subscription");
+    });
+
+    it("should identify API providers as metered", () => {
+      const t = new CostTracker(makeMeteredConfig());
+      expect(t.isMetered).toBe(true);
+      expect(t.pricing).toBe("metered");
+    });
+
+    it("should identify ollama as free (non-metered)", () => {
+      const t = new CostTracker(makeConfig({ provider: "ollama" }));
+      expect(t.isMetered).toBe(false);
+      expect(t.pricing).toBe("free");
+    });
   });
 
   describe("record and getNodeCost", () => {
@@ -60,6 +85,16 @@ describe("CostTracker", () => {
     });
   });
 
+  describe("token tracking", () => {
+    it("should track tokens per node", () => {
+      tracker.record("node-1", makeUsage(1.0));
+      tracker.record("node-1", makeUsage(2.0));
+      const totals = tracker.getTotalTokens();
+      expect(totals.input).toBe(2000);
+      expect(totals.output).toBe(1000);
+    });
+  });
+
   describe("getTotalCost", () => {
     it("should return 0 with no recorded costs", () => {
       expect(tracker.getTotalCost()).toBe(0);
@@ -73,51 +108,66 @@ describe("CostTracker", () => {
     });
   });
 
-  describe("budget mode: hard", () => {
+  describe("subscription provider — no budget enforcement", () => {
+    it("should NOT throw even when total budget is exceeded", () => {
+      const config = makeConfig({ budget: { perBranchUsd: 1.0, totalUsd: 1.0, mode: "hard" } });
+      const t = new CostTracker(config);
+      t.record("node-1", makeUsage(5.0));
+      expect(() => t.record("node-2", makeUsage(5.0))).not.toThrow();
+    });
+
+    it("should still track costs for informational display", () => {
+      tracker.record("node-1", makeUsage(10.0));
+      expect(tracker.getTotalCost()).toBe(10.0);
+    });
+  });
+
+  describe("metered provider — budget mode: hard", () => {
     it("should throw BudgetExceededError when total budget is exceeded", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 100, totalUsd: 2.0, mode: "hard" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 100, totalUsd: 2.0, mode: "hard" } });
       const t = new CostTracker(config);
       t.record("node-1", makeUsage(1.5));
       expect(() => t.record("node-2", makeUsage(1.0))).toThrow(BudgetExceededError);
     });
 
     it("should throw BudgetExceededError when per-branch budget is exceeded", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 1.0, totalUsd: 100, mode: "hard" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 1.0, totalUsd: 100, mode: "hard" } });
       const t = new CostTracker(config);
       expect(() => t.record("node-1", makeUsage(1.5))).toThrow(BudgetExceededError);
     });
 
     it("should not throw when within budget", () => {
-      tracker.record("node-1", makeUsage(0.5));
-      expect(tracker.getNodeCost("node-1")).toBe(0.5);
+      const t = new CostTracker(makeMeteredConfig());
+      t.record("node-1", makeUsage(0.5));
+      expect(t.getNodeCost("node-1")).toBe(0.5);
     });
   });
 
-  describe("budget mode: warn", () => {
+  describe("metered provider — budget mode: warn", () => {
     it("should not throw when total budget is exceeded", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "warn" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "warn" } });
       const t = new CostTracker(config);
       t.record("node-1", makeUsage(0.8));
       expect(() => t.record("node-2", makeUsage(0.5))).not.toThrow();
     });
 
     it("should not throw when per-branch budget is exceeded", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 1.0, totalUsd: 100, mode: "warn" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 1.0, totalUsd: 100, mode: "warn" } });
       const t = new CostTracker(config);
       expect(() => t.record("node-1", makeUsage(2.0))).not.toThrow();
     });
   });
 
-  describe("budget mode: none", () => {
+  describe("metered provider — budget mode: none", () => {
     it("should not throw when total budget is exceeded", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "none" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "none" } });
       const t = new CostTracker(config);
       t.record("node-1", makeUsage(5.0));
       expect(() => t.record("node-2", makeUsage(5.0))).not.toThrow();
     });
 
     it("should still track costs", () => {
-      const config = makeConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "none" } });
+      const config = makeMeteredConfig({ budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "none" } });
       const t = new CostTracker(config);
       t.record("node-1", makeUsage(5.0));
       expect(t.getTotalCost()).toBe(5.0);
@@ -131,7 +181,6 @@ describe("CostTracker", () => {
     });
 
     it("should return false when adding amount exceeds total budget", () => {
-      // Use "none" mode to avoid BudgetExceededError during recording
       const config = makeConfig({ budget: { perBranchUsd: 100, totalUsd: 25.0, mode: "none" } });
       const t = new CostTracker(config);
       t.record("node-1", makeUsage(20.0));
@@ -167,11 +216,24 @@ describe("CostTracker", () => {
       expect(summary.totalCostUsd).toBeCloseTo(5.0, 10);
       expect(summary.nodeCosts["node-1"]).toBe(2.0);
       expect(summary.nodeCosts["node-2"]).toBe(3.0);
-      expect(summary.budgetRemaining).toBeCloseTo(20.0, 10);
+      expect(summary.isMetered).toBe(false);
+      expect(summary.totalTokens.input).toBe(2000);
+      expect(summary.totalTokens.output).toBe(1000);
     });
 
-    it("should clamp budgetRemaining to 0", () => {
-      const config = makeConfig({
+    it("should show infinite budgetRemaining for subscription", () => {
+      tracker.record("node-1", makeUsage(5.0));
+      expect(tracker.getSummary().budgetRemaining).toBe(Infinity);
+    });
+
+    it("should show finite budgetRemaining for metered", () => {
+      const t = new CostTracker(makeMeteredConfig());
+      t.record("node-1", makeUsage(5.0));
+      expect(t.getSummary().budgetRemaining).toBeCloseTo(20.0, 10);
+    });
+
+    it("should clamp metered budgetRemaining to 0", () => {
+      const config = makeMeteredConfig({
         budget: { perBranchUsd: 100, totalUsd: 1.0, mode: "none" },
       });
       const t = new CostTracker(config);
@@ -183,7 +245,6 @@ describe("CostTracker", () => {
       const summary = tracker.getSummary();
       expect(summary.totalCostUsd).toBe(0);
       expect(Object.keys(summary.nodeCosts)).toHaveLength(0);
-      expect(summary.budgetRemaining).toBe(25.0);
     });
   });
 

@@ -33,6 +33,11 @@ let mockProvider: ExecutionProvider;
 vi.mock("../../../src/providers/registry.js", () => ({
   ProviderRegistry: {
     create: vi.fn(() => mockProvider),
+    getProviderInfo: vi.fn(() => ({
+      name: "Claude Code CLI",
+      pricing: "subscription",
+      supportsFork: true,
+    })),
   },
 }));
 

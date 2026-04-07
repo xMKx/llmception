@@ -1,5 +1,6 @@
-import type { LlmceptionConfig, TokenUsage } from "../types.js";
+import type { LlmceptionConfig, PricingModel, TokenUsage } from "../types.js";
 import { logger } from "../util/logger.js";
+import { ProviderRegistry } from "../providers/registry.js";
 
 /** Thrown when a hard budget limit is exceeded. */
 export class BudgetExceededError extends Error {
@@ -11,23 +12,42 @@ export class BudgetExceededError extends Error {
 
 /**
  * Tracks costs per node and enforces budget limits.
+ * For subscription/free providers, costs are tracked as informational
+ * "API-equivalent" values and budgets are never enforced.
  */
 export class CostTracker {
   private config: LlmceptionConfig;
   private nodeCosts: Map<string, number> = new Map();
+  private nodeTokens: Map<string, { input: number; output: number }> = new Map();
+  readonly pricing: PricingModel;
 
   constructor(config: LlmceptionConfig) {
     this.config = config;
+    this.pricing = ProviderRegistry.getProviderInfo(config.provider).pricing;
+  }
+
+  /** Whether costs represent real charges (metered) or just informational equivalents */
+  get isMetered(): boolean {
+    return this.pricing === "metered";
   }
 
   /**
    * Record token usage for a node.
-   * Enforces budget based on the configured mode.
+   * Enforces budget only for metered providers.
    */
   record(nodeId: string, usage: TokenUsage): void {
     const current = this.nodeCosts.get(nodeId) ?? 0;
     const newNodeCost = current + usage.costUsd;
     this.nodeCosts.set(nodeId, newNodeCost);
+
+    const currentTokens = this.nodeTokens.get(nodeId) ?? { input: 0, output: 0 };
+    this.nodeTokens.set(nodeId, {
+      input: currentTokens.input + usage.inputTokens,
+      output: currentTokens.output + usage.outputTokens,
+    });
+
+    // Skip budget enforcement for subscription/free providers
+    if (!this.isMetered) return;
 
     const totalCost = this.getTotalCost();
     const mode = this.config.budget.mode;
@@ -73,11 +93,24 @@ export class CostTracker {
     return this.getNodeCost(nodeId) + additionalUsd <= this.config.budget.perBranchUsd;
   }
 
+  /** Get total tokens across all nodes */
+  getTotalTokens(): { input: number; output: number } {
+    let input = 0;
+    let output = 0;
+    this.nodeTokens.forEach((tokens) => {
+      input += tokens.input;
+      output += tokens.output;
+    });
+    return { input, output };
+  }
+
   /** Get a summary of all tracked costs. */
   getSummary(): {
     totalCostUsd: number;
     nodeCosts: Record<string, number>;
     budgetRemaining: number;
+    isMetered: boolean;
+    totalTokens: { input: number; output: number };
   } {
     const totalCostUsd = this.getTotalCost();
     const nodeCosts: Record<string, number> = {};
@@ -87,7 +120,11 @@ export class CostTracker {
     return {
       totalCostUsd,
       nodeCosts,
-      budgetRemaining: Math.max(0, this.config.budget.totalUsd - totalCostUsd),
+      budgetRemaining: this.isMetered
+        ? Math.max(0, this.config.budget.totalUsd - totalCostUsd)
+        : Infinity,
+      isMetered: this.isMetered,
+      totalTokens: this.getTotalTokens(),
     };
   }
 
