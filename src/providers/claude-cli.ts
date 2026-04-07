@@ -90,6 +90,10 @@ export class ClaudeCliProvider implements ExecutionProvider {
       env: { ...process.env },
     });
 
+    // Close stdin immediately — prompt is passed as a positional arg,
+    // not via stdin. Leaving stdin open causes Claude Code to wait for input.
+    child.stdin?.end();
+
     this.activeProcess = child;
 
     // Collect stderr for error reporting
