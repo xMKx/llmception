@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { realpath } from "node:fs/promises";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { execGit } from "../util/exec.js";
@@ -9,26 +9,45 @@ const GITIGNORE_ENTRIES = [".llmception-worktrees/", ".llmception/"];
 
 /**
  * Manages git worktrees for parallel exploration branches.
+ *
+ * Handles the case where the user runs llmception from a subdirectory
+ * of a git repo. The worktree dir and .llmception state are placed in
+ * the user's cwd, but git operations use the actual repo root.
  */
 export class WorktreeManager {
-  private repoRoot: string;
-  private resolvedRoot: string | null = null;
+  /** The directory the user ran llmception from */
+  private userCwd: string;
+  /** The actual git repo root (resolved lazily) */
+  private gitRoot: string | null = null;
 
   constructor(repoRoot: string) {
-    this.repoRoot = repoRoot;
+    this.userCwd = repoRoot;
   }
 
-  /** Resolve symlinks in the repo root (macOS /tmp -> /private/tmp). */
-  private async getResolvedRoot(): Promise<string> {
-    if (!this.resolvedRoot) {
-      this.resolvedRoot = await realpath(this.repoRoot);
+  /** Get the actual git root (may differ from userCwd if in a subdirectory) */
+  private async getGitRoot(): Promise<string> {
+    if (!this.gitRoot) {
+      try {
+        this.gitRoot = await execGit(["rev-parse", "--show-toplevel"], this.userCwd);
+      } catch {
+        // Not a git repo yet — will be initialized by ensureGitignore
+        this.gitRoot = this.userCwd;
+      }
     }
-    return this.resolvedRoot;
+    return this.gitRoot;
   }
 
-  /** Return the repo root path. */
+  /** Get the relative path from git root to user's cwd (empty if same) */
+  private async getSubdirPrefix(): Promise<string> {
+    const gitRoot = await this.getGitRoot();
+    const rel = relative(gitRoot, this.userCwd);
+    return rel || "";
+  }
+
+
+  /** Return the user's cwd. */
   getRepoRoot(): string {
-    return this.repoRoot;
+    return this.userCwd;
   }
 
   /**
@@ -41,11 +60,12 @@ export class WorktreeManager {
     treeId: string,
     fromCommit?: string,
   ): Promise<{ worktreePath: string; branchName: string }> {
-    const worktreePath = join(this.repoRoot, WORKTREE_DIR, nodeId);
+    const worktreePath = join(this.userCwd, WORKTREE_DIR, nodeId);
     const branchName = `llmception/${treeId}/${nodeId}`;
+    const gitRoot = await this.getGitRoot();
 
     // Ensure the worktrees parent directory exists
-    await mkdir(join(this.repoRoot, WORKTREE_DIR), { recursive: true });
+    await mkdir(join(this.userCwd, WORKTREE_DIR), { recursive: true });
 
     const args = ["worktree", "add", "-b", branchName, worktreePath];
     if (fromCommit) {
@@ -53,7 +73,7 @@ export class WorktreeManager {
     }
 
     logger.debug(`Creating worktree: ${worktreePath} on branch ${branchName}`);
-    await execGit(args, this.repoRoot);
+    await execGit(args, gitRoot);
 
     return { worktreePath, branchName };
   }
@@ -62,7 +82,8 @@ export class WorktreeManager {
    * Remove a worktree and its branch.
    */
   async remove(nodeId: string): Promise<void> {
-    const worktreePath = join(this.repoRoot, WORKTREE_DIR, nodeId);
+    const worktreePath = join(this.userCwd, WORKTREE_DIR, nodeId);
+    const gitRoot = await this.getGitRoot();
 
     // Find the branch name before removing the worktree
     let branchName: string | null = null;
@@ -77,13 +98,12 @@ export class WorktreeManager {
 
     // Remove the worktree
     try {
-      await execGit(["worktree", "remove", "--force", worktreePath], this.repoRoot);
+      await execGit(["worktree", "remove", "--force", worktreePath], gitRoot);
     } catch {
-      // If git worktree remove fails, try manual cleanup
       logger.debug(`Git worktree remove failed for ${worktreePath}, attempting manual cleanup`);
       try {
         await rm(worktreePath, { recursive: true, force: true });
-        await execGit(["worktree", "prune"], this.repoRoot);
+        await execGit(["worktree", "prune"], gitRoot);
       } catch {
         // Best effort
       }
@@ -92,7 +112,7 @@ export class WorktreeManager {
     // Delete the branch
     if (branchName && branchName.startsWith("llmception/")) {
       try {
-        await execGit(["branch", "-D", branchName], this.repoRoot);
+        await execGit(["branch", "-D", branchName], gitRoot);
       } catch {
         // Branch may already be deleted
       }
@@ -148,48 +168,73 @@ export class WorktreeManager {
 
   /**
    * Get the diff between main (or HEAD) and a branch.
+   * Scoped to the user's subdirectory if applicable.
    */
   async getDiff(branchName: string): Promise<string> {
     const baseBranch = await this.getBaseBranch();
-    return await execGit(
-      ["diff", `${baseBranch}...${branchName}`],
-      this.repoRoot,
-    );
+    const gitRoot = await this.getGitRoot();
+    const subdirPrefix = await this.getSubdirPrefix();
+
+    const args = ["diff", `${baseBranch}...${branchName}`];
+    if (subdirPrefix) {
+      args.push("--", subdirPrefix);
+    }
+    return await execGit(args, gitRoot);
   }
 
   /**
    * Get the diff stat between main (or HEAD) and a branch.
+   * Scoped to the user's subdirectory if applicable.
    */
   async getDiffStat(branchName: string): Promise<string> {
     const baseBranch = await this.getBaseBranch();
-    return await execGit(
-      ["diff", "--stat", `${baseBranch}...${branchName}`],
-      this.repoRoot,
-    );
+    const gitRoot = await this.getGitRoot();
+    const subdirPrefix = await this.getSubdirPrefix();
+
+    const args = ["diff", "--stat", `${baseBranch}...${branchName}`];
+    if (subdirPrefix) {
+      args.push("--", subdirPrefix);
+    }
+    return await execGit(args, gitRoot);
   }
 
   /**
-   * Apply changes from a branch to the main worktree using a patch.
+   * Apply changes from a branch to the user's cwd.
+   * If the user is in a subdirectory of the git repo, only changes under
+   * that subdirectory are applied, with paths adjusted to be relative.
    */
   async applyBranch(branchName: string): Promise<void> {
     const baseBranch = await this.getBaseBranch();
+    const gitRoot = await this.getGitRoot();
+    const subdirPrefix = await this.getSubdirPrefix();
 
-    // Use execCommand to get the raw diff (not trimmed, preserving trailing newline)
     const { execCommand } = await import("../util/exec.js");
-    const diffResult = await execCommand(
-      "git",
-      ["diff", `${baseBranch}...${branchName}`],
-      { cwd: this.repoRoot },
-    );
 
-    const diff = diffResult.stdout;
+    // Get diff, optionally scoped to the subdirectory
+    const diffArgs = ["diff", `${baseBranch}...${branchName}`];
+    if (subdirPrefix) {
+      diffArgs.push("--", subdirPrefix);
+    }
+
+    const diffResult = await execCommand("git", diffArgs, { cwd: gitRoot });
+    let diff = diffResult.stdout;
+
     if (!diff.trim()) {
       logger.info(`No changes to apply from branch ${branchName}`);
       return;
     }
 
+    // If in a subdirectory, strip the prefix from paths so apply works in cwd
+    if (subdirPrefix) {
+      const prefixWithSlash = subdirPrefix + "/";
+      diff = diff
+        .replace(new RegExp(`a/${prefixWithSlash.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, "g"), "a/")
+        .replace(new RegExp(`b/${prefixWithSlash.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, "g"), "b/");
+    }
+
+    const applyCwd = subdirPrefix ? this.userCwd : gitRoot;
     const result = await execCommand("git", ["apply", "--3way"], {
-      cwd: this.repoRoot,
+      cwd: applyCwd,
       input: diff,
     });
 
@@ -205,13 +250,13 @@ export class WorktreeManager {
   async ensureGitignore(): Promise<void> {
     // Ensure it's a git repo (needed for worktrees)
     try {
-      await execGit(["rev-parse", "--git-dir"], this.repoRoot);
+      await execGit(["rev-parse", "--git-dir"], this.userCwd);
     } catch {
       logger.info("Not a git repository. Initializing one for worktree support...");
-      await execGit(["init"], this.repoRoot);
+      await execGit(["init"], this.userCwd);
     }
 
-    const gitignorePath = join(this.repoRoot, ".gitignore");
+    const gitignorePath = join(this.userCwd, ".gitignore");
     let content = "";
 
     try {
@@ -238,11 +283,11 @@ export class WorktreeManager {
 
     // Ensure at least one commit exists (worktrees require a commit)
     try {
-      await execGit(["rev-parse", "HEAD"], this.repoRoot);
+      await execGit(["rev-parse", "HEAD"], this.userCwd);
     } catch {
       logger.info("No commits found. Creating initial commit for worktree support...");
-      await execGit(["add", ".gitignore"], this.repoRoot);
-      await execGit(["commit", "-m", "Initial commit (llmception)"], this.repoRoot);
+      await execGit(["add", ".gitignore"], this.userCwd);
+      await execGit(["commit", "-m", "Initial commit (llmception)"], this.userCwd);
     }
   }
 
@@ -250,12 +295,13 @@ export class WorktreeManager {
    * List all llmception worktree paths.
    */
   async list(): Promise<string[]> {
-    const output = await execGit(["worktree", "list", "--porcelain"], this.repoRoot);
+    const gitRoot = await this.getGitRoot();
+    const output = await execGit(["worktree", "list", "--porcelain"], gitRoot);
     if (!output.trim()) return [];
 
     const paths: string[] = [];
-    const resolvedRoot = await this.getResolvedRoot();
-    const wtDir = join(resolvedRoot, WORKTREE_DIR);
+    const resolvedCwd = await realpath(this.userCwd);
+    const wtDir = join(resolvedCwd, WORKTREE_DIR);
 
     for (const line of output.split("\n")) {
       if (line.startsWith("worktree ")) {
@@ -271,12 +317,13 @@ export class WorktreeManager {
 
   /** Determine the base branch (main, master, or HEAD). */
   private async getBaseBranch(): Promise<string> {
+    const gitRoot = await this.getGitRoot();
     try {
-      await execGit(["rev-parse", "--verify", "main"], this.repoRoot);
+      await execGit(["rev-parse", "--verify", "main"], gitRoot);
       return "main";
     } catch {
       try {
-        await execGit(["rev-parse", "--verify", "master"], this.repoRoot);
+        await execGit(["rev-parse", "--verify", "master"], gitRoot);
         return "master";
       } catch {
         return "HEAD";
