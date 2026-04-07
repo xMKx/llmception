@@ -22,7 +22,7 @@ export class ClaudeCliProvider implements ExecutionProvider {
   readonly name = "Claude Code CLI";
   readonly type: ProviderType = "claude-cli";
   readonly pricing: PricingModel = "subscription";
-  readonly supportsFork = true;
+  readonly supportsFork = false;
 
   private config: LlmceptionConfig;
   private sessionForker: SessionForker;

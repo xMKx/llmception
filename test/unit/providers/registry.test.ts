@@ -34,7 +34,7 @@ describe("ProviderRegistry", () => {
       expect(provider.type).toBe("claude-cli");
       expect(provider.name).toBe("Claude Code CLI");
       expect(provider.pricing).toBe("subscription");
-      expect(provider.supportsFork).toBe(true);
+      expect(provider.supportsFork).toBe(false);
     });
 
     it("should create an AnthropicApiProvider for 'anthropic'", () => {
@@ -74,7 +74,7 @@ describe("ProviderRegistry", () => {
       expect(info).toEqual({
         name: "Claude Code CLI",
         pricing: "subscription",
-        supportsFork: true,
+        supportsFork: false,
       });
     });
 

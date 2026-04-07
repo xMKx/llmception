@@ -84,7 +84,7 @@ describe("ClaudeCliProvider", () => {
       expect(provider.name).toBe("Claude Code CLI");
       expect(provider.type).toBe("claude-cli");
       expect(provider.pricing).toBe("subscription");
-      expect(provider.supportsFork).toBe(true);
+      expect(provider.supportsFork).toBe(false);
     });
   });
 

@@ -19,7 +19,7 @@ const PROVIDER_INFO: Record<ProviderType, ProviderInfo> = {
   "claude-cli": {
     name: "Claude Code CLI",
     pricing: "subscription",
-    supportsFork: true,
+    supportsFork: false,
   },
   anthropic: {
     name: "Anthropic API",
