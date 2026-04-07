@@ -285,11 +285,32 @@ export class Orchestrator {
         label: this.getNodeLabel(node),
         detail: `${tokenStr} tokens`,
       });
+
+      // Commit all changes in the node's worktree so they're available for apply
+      if (node.worktreePath) {
+        void this.commitWorktreeChanges(node);
+      }
     }
 
     this.pendingNodes.delete(node.id);
     this.emitProgress();
     this.checkDone();
+  }
+
+  /** Commit all changes in a completed node's worktree */
+  private async commitWorktreeChanges(node: TreeNode): Promise<void> {
+    if (!node.worktreePath) return;
+    try {
+      const commitHash = await this.worktreeManager.snapshot(
+        node.worktreePath,
+        `llmception: ${this.getNodeLabel(node)} implementation`,
+      );
+      node.setCommit(commitHash);
+      logger.debug(`[Node ${node.id}] Committed changes: ${commitHash}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[Node ${node.id}] Could not commit worktree changes: ${msg}`);
+    }
   }
 
   private handleError(node: TreeNode, message: string): void {
