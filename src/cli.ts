@@ -62,11 +62,11 @@ async function main(): Promise<void> {
     .option("--json", "output as JSON")
     .action(statusAction);
 
-  // answer <option>
+  // answer [option]
   program
-    .command("answer <option>")
+    .command("answer [option]")
     .alias("a")
-    .description("Answer the current question (1-based option index)")
+    .description("Answer the current question (by number, label, or interactively)")
     .action(answerAction);
 
   // diff [nodeId]

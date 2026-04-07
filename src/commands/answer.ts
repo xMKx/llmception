@@ -1,9 +1,58 @@
+import { createInterface } from "node:readline";
 import chalk from "chalk";
 import { TreeSerializer } from "../tree/serializer.js";
 import { TreeDisplay } from "../tree/display.js";
 import { TreePruner } from "../tree/pruner.js";
+import type { DecisionTree } from "../tree/tree.js";
+import type { InterceptedQuestion } from "../types.js";
+import type { TreeNode } from "../tree/node.js";
 
-export async function answerAction(option: string): Promise<void> {
+/** Prompt the user for input on stdin */
+function prompt(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/** Resolve an answer string (number or label) to a child index */
+function resolveAnswer(
+  option: string,
+  questionNode: TreeNode,
+  question: InterceptedQuestion,
+  tree: DecisionTree,
+): string | null {
+  const options = question.options;
+  const childIds = questionNode.childIds;
+
+  // Try as 1-based index
+  const asNum = parseInt(option, 10);
+  if (!Number.isNaN(asNum) && asNum >= 1 && asNum <= options.length) {
+    const chosenLabel = options[asNum - 1].label;
+    return childIds.find((cid) => {
+      const child = tree.getNode(cid);
+      return child && child.answer?.label === chosenLabel;
+    }) ?? childIds[asNum - 1] ?? null;
+  }
+
+  // Try case-insensitive substring match on labels
+  const lower = option.toLowerCase();
+  const matchIdx = options.findIndex((o) => o.label.toLowerCase().includes(lower));
+  if (matchIdx !== -1) {
+    const chosenLabel = options[matchIdx].label;
+    return childIds.find((cid) => {
+      const child = tree.getNode(cid);
+      return child && child.answer?.label === chosenLabel;
+    }) ?? childIds[matchIdx] ?? null;
+  }
+
+  return null;
+}
+
+export async function answerAction(option?: string): Promise<void> {
   const cwd = process.cwd();
 
   // 1. Load latest tree
@@ -13,104 +62,60 @@ export async function answerAction(option: string): Promise<void> {
     return;
   }
 
-  // 2. Get first unresolved question
-  const firstQ = tree.getFirstUnresolvedQuestion();
-  if (!firstQ) {
-    // Check if there are completed leaves to show helpful guidance
-    const leaves = tree.getCompletedLeaves().filter((n) => n.status !== "pruned");
-    if (leaves.length === 1) {
-      console.log(chalk.green("Already resolved to a single implementation."));
-      console.log(chalk.dim('Run "llmception apply" to apply changes.'));
-    } else if (leaves.length > 1) {
-      console.log(`${leaves.length} implementations exist but no questions to answer.`);
-      console.log("Completed branches:");
-      for (let i = 0; i < leaves.length; i++) {
-        console.log(`  [${i + 1}] ${leaves[i].answer?.label ?? "root"} (${leaves[i].id.slice(0, 8)})`);
+  // Loop: answer questions until resolved or user quits
+  let currentOption = option;
+
+  while (true) {
+    // 2. Get first unresolved question
+    const firstQ = tree.getFirstUnresolvedQuestion();
+    if (!firstQ) {
+      const leaves = tree.getCompletedLeaves().filter((n) => n.status !== "pruned");
+      if (leaves.length === 1) {
+        console.log(chalk.green.bold(`Resolved: ${leaves[0].answer?.label ?? "root"}`));
+        console.log(chalk.dim('Run "llmception apply" to apply changes to your working tree.'));
+      } else if (leaves.length > 1) {
+        console.log(`${leaves.length} implementations exist but no more questions to narrow down.`);
+      } else {
+        console.log("No questions to answer and no completed implementations.");
       }
-      console.log(chalk.dim('\nRun "llmception diff <nodeId>" to compare, or "llmception status --tree" to view.'));
-    } else {
-      console.log("No questions to answer and no completed implementations.");
+      break;
     }
-    return;
-  }
 
-  const options = firstQ.question.options;
-
-  // 3. If no option given or invalid, show the question
-  let chosenIndex = -1;
-  const asNum = parseInt(option, 10);
-
-  if (!Number.isNaN(asNum) && asNum >= 1 && asNum <= options.length) {
-    chosenIndex = asNum - 1;
-  } else {
-    // Try case-insensitive substring match on labels
-    const lower = option.toLowerCase();
-    chosenIndex = options.findIndex((o) => o.label.toLowerCase().includes(lower));
-  }
-
-  if (chosenIndex === -1) {
-    console.log(chalk.yellow(`Could not match "${option}" to any option.`));
-    console.log("");
+    // 3. Show the question
     console.log(TreeDisplay.formatQuestion(firstQ.node, firstQ.question, tree));
-    console.log(chalk.bold('Run "llmception answer <number>" to choose.'));
-    return;
-  }
 
-  // 4. Find the child node for this option
-  const childIds = firstQ.node.childIds;
-  // Match child by option label (children may not be in same order as options)
-  const chosenLabel = options[chosenIndex].label;
-  const chosenChildId = childIds.find((cid) => {
-    const child = tree.getNode(cid);
-    return child && child.answer?.label === chosenLabel;
-  });
-
-  if (!chosenChildId) {
-    // Fallback: match by index if labels don't align
-    if (chosenIndex < childIds.length) {
-      const fallbackId = childIds[chosenIndex];
-      const pruner = new TreePruner(tree);
-      const pruned = pruner.pruneByAnswer(firstQ.node.id, fallbackId);
-      const fallbackNode = tree.getNode(fallbackId);
-      console.log(chalk.green(`Chose: "${fallbackNode?.answer?.label ?? option}"`));
-      console.log(chalk.dim(`Pruned ${pruned.length} node(s).`));
+    // 4. Get the answer (from arg or interactive)
+    let answerStr: string;
+    if (currentOption !== undefined) {
+      answerStr = currentOption;
+      currentOption = undefined; // Only use the CLI arg for the first question
     } else {
-      console.error(chalk.red(`Option ${option} does not have a corresponding branch.`));
-      process.exitCode = 1;
-      return;
+      // Interactive: ask for input
+      answerStr = await prompt(chalk.bold("  Your choice: "));
+      if (!answerStr || answerStr.toLowerCase() === "q" || answerStr.toLowerCase() === "quit") {
+        console.log(chalk.dim("Exiting. Progress saved."));
+        await TreeSerializer.save(tree, cwd);
+        break;
+      }
     }
-  } else {
-    // 5. Prune siblings
+
+    // 5. Resolve the answer
+    const chosenChildId = resolveAnswer(answerStr, firstQ.node, firstQ.question, tree);
+
+    if (!chosenChildId) {
+      console.log(chalk.yellow(`  Could not match "${answerStr}". Try a number (1-${firstQ.question.options.length}) or a label keyword.`));
+      console.log("");
+      continue;
+    }
+
+    // 6. Prune siblings
+    const chosenChild = tree.getNode(chosenChildId);
     const pruner = new TreePruner(tree);
     const pruned = pruner.pruneByAnswer(firstQ.node.id, chosenChildId);
-    console.log(chalk.green(`Chose: "${chosenLabel}"`));
-    console.log(chalk.dim(`Pruned ${pruned.length} node(s).`));
-  }
-
-  // 6. Save updated tree
-  await TreeSerializer.save(tree, cwd);
-
-  // 7. Check for next question or resolution
-  const nextQ = tree.getFirstUnresolvedQuestion();
-  if (nextQ) {
-    console.log(TreeDisplay.formatQuestion(nextQ.node, nextQ.question, tree));
-    console.log(chalk.bold('Run "llmception answer <number>" to choose.'));
-    return;
-  }
-
-  // 8. Check if resolved to single implementation
-  const completedLeaves = tree.getCompletedLeaves().filter(
-    (n) => n.status !== "pruned",
-  );
-
-  if (completedLeaves.length === 1) {
-    const winner = completedLeaves[0];
+    console.log(chalk.green(`  Chose: "${chosenChild?.answer?.label ?? answerStr}" (pruned ${pruned.length} branch${pruned.length !== 1 ? "es" : ""})`));
     console.log("");
-    console.log(chalk.green.bold(`Resolved: ${winner.answer?.label ?? "root"}`));
-    console.log(chalk.dim('Run "llmception apply" to apply changes to your working tree.'));
-  } else if (completedLeaves.length === 0) {
-    console.log("No completed implementations remaining.");
-  } else {
-    console.log(`${completedLeaves.length} implementations remain.`);
+
+    // 7. Save after each answer
+    await TreeSerializer.save(tree, cwd);
   }
 }

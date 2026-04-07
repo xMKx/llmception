@@ -28,7 +28,8 @@ export class TreePruner {
     const pruned: string[] = [];
     for (const childId of parent.childIds) {
       if (childId !== chosenChildId) {
-        pruned.push(...this.pruneSubtree(childId));
+        // Force-prune: user explicitly chose, so discard siblings even if completed
+        pruned.push(...this.pruneSubtree(childId, true));
       }
     }
     return pruned;
@@ -82,31 +83,25 @@ export class TreePruner {
 
   /**
    * Recursively prune a node and all its descendants.
+   * When force is true, prunes even completed/failed nodes (used by pruneByAnswer).
    *
    * @returns IDs of all pruned nodes
    */
-  pruneSubtree(nodeId: string): string[] {
+  pruneSubtree(nodeId: string, force = false): string[] {
     const node = this.tree.getNode(nodeId);
     if (!node) return [];
 
     const pruned: string[] = [];
 
-    // Only prune nodes that aren't already in a terminal state
-    if (
-      node.status !== "completed" &&
-      node.status !== "failed" &&
-      node.status !== "pruned"
-    ) {
+    if (node.status === "pruned") {
+      // Already pruned; still recurse to catch children
+    } else if (force || (node.status !== "completed" && node.status !== "failed")) {
       node.setStatus("pruned");
       pruned.push(nodeId);
-    } else if (node.status === "pruned") {
-      // Already pruned; still recurse to catch children
-    } else {
-      // completed or failed: don't re-prune, but still recurse
     }
 
     for (const childId of node.childIds) {
-      pruned.push(...this.pruneSubtree(childId));
+      pruned.push(...this.pruneSubtree(childId, force));
     }
 
     return pruned;

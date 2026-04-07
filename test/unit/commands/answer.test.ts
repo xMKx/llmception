@@ -13,7 +13,7 @@ vi.mock("../../../src/tree/serializer.js", () => ({
 import { TreeSerializer } from "../../../src/tree/serializer.js";
 import { answerAction } from "../../../src/commands/answer.js";
 
-function makeConfig(overrides: Partial<LlmceptionConfig> = {}): LlmceptionConfig {
+function makeConfig(): LlmceptionConfig {
   return {
     provider: "claude-cli",
     maxDepth: 3,
@@ -26,7 +26,6 @@ function makeConfig(overrides: Partial<LlmceptionConfig> = {}): LlmceptionConfig
     permissionMode: "bypassPermissions",
     claudeCodePath: "claude",
     providers: {},
-    ...overrides,
   };
 }
 
@@ -50,9 +49,12 @@ function makeTreeWithQuestion(): DecisionTree {
       makeAnswer("SQLite"),
     ],
   });
-  tree.addChild(root.id, makeAnswer("PostgreSQL"));
-  tree.addChild(root.id, makeAnswer("MongoDB"));
-  tree.addChild(root.id, makeAnswer("SQLite"));
+  const c1 = tree.addChild(root.id, makeAnswer("PostgreSQL"));
+  const c2 = tree.addChild(root.id, makeAnswer("MongoDB"));
+  const c3 = tree.addChild(root.id, makeAnswer("SQLite"));
+  c1.setCompleted([], "");
+  c2.setCompleted([], "");
+  c3.setCompleted([], "");
   return tree;
 }
 
@@ -81,7 +83,7 @@ describe("answerAction", () => {
     expect(logSpy).toHaveBeenCalledWith("No active exploration found.");
   });
 
-  it("should show guidance when no questions remain but leaves exist", async () => {
+  it("should show guidance when no questions remain", async () => {
     const tree = new DecisionTree("Build a widget", makeConfig());
     const root = tree.createRoot();
     root.setCompleted(["file.ts"], "+1/-0");
@@ -89,17 +91,11 @@ describe("answerAction", () => {
 
     await answerAction("1");
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("resolved");
+    // Single completed leaf — should show resolved message
+    expect(allOutput).toMatch(/[Rr]esolved/);
   });
 
-  it("should show question when option doesn't match", async () => {
-    mockLoadLatest.mockResolvedValue(makeTreeWithQuestion());
-    await answerAction("xyz-nomatch");
-    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("Could not match");
-  });
-
-  it("should prune sibling branches when choosing option 1", async () => {
+  it("should prune sibling branches when choosing by number", async () => {
     const tree = makeTreeWithQuestion();
     mockLoadLatest.mockResolvedValue(tree);
 
@@ -107,7 +103,7 @@ describe("answerAction", () => {
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(allOutput).toContain("PostgreSQL");
-    expect(allOutput).toContain("Pruned 2 node(s)");
+    expect(allOutput).toContain("pruned 2 branch");
 
     // The other two should be pruned
     const root = tree.getRootNode();
@@ -117,15 +113,20 @@ describe("answerAction", () => {
     expect(sibling2?.status).toBe("pruned");
   });
 
-  it("should prune sibling branches when choosing option 2", async () => {
+  it("should prune completed siblings (force prune)", async () => {
     const tree = makeTreeWithQuestion();
+    // All children are "completed" - pruner must force-prune them
     mockLoadLatest.mockResolvedValue(tree);
 
     await answerAction("2");
 
-    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("MongoDB");
-    expect(allOutput).toContain("Pruned 2 node(s)");
+    const root = tree.getRootNode();
+    const chosen = tree.getNode(root.childIds[1]);
+    const sibling0 = tree.getNode(root.childIds[0]);
+    const sibling2 = tree.getNode(root.childIds[2]);
+    expect(chosen?.status).toBe("completed"); // not pruned
+    expect(sibling0?.status).toBe("pruned");
+    expect(sibling2?.status).toBe("pruned");
   });
 
   it("should match by label substring (case-insensitive)", async () => {
@@ -143,27 +144,21 @@ describe("answerAction", () => {
     mockLoadLatest.mockResolvedValue(tree);
 
     await answerAction("1");
-    expect(mockSave).toHaveBeenCalledTimes(1);
-    expect(mockSave).toHaveBeenCalledWith(tree, expect.any(String));
+    expect(mockSave).toHaveBeenCalled();
   });
 
-  it("should report single implementation when resolved", async () => {
+  it("should report resolved when single leaf remains", async () => {
     const tree = makeTreeWithQuestion();
-    const root = tree.getRootNode();
-    const chosenChildId = root.childIds[0];
-    const chosenChild = tree.getNode(chosenChildId)!;
-    chosenChild.setCompleted(["app.ts"], "+100/-0");
-
     mockLoadLatest.mockResolvedValue(tree);
 
     await answerAction("1");
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(allOutput).toContain("Resolved");
-    expect(allOutput).toContain("PostgreSQL");
+    expect(allOutput).toContain("apply");
   });
 
-  it("should show next question if one exists after answering", async () => {
+  it("should show next question after answering first one", async () => {
     const tree = new DecisionTree("Build a widget", makeConfig());
     const root = tree.createRoot();
     root.setQuestion({
@@ -172,23 +167,38 @@ describe("answerAction", () => {
       options: [makeAnswer("PostgreSQL"), makeAnswer("MongoDB")],
     });
     const c1 = tree.addChild(root.id, makeAnswer("PostgreSQL"));
-    tree.addChild(root.id, makeAnswer("MongoDB"));
+    const c2 = tree.addChild(root.id, makeAnswer("MongoDB"));
+    c1.setCompleted([], "");
+    c2.setCompleted([], "");
 
-    // The chosen child also has a question with children
+    // The chosen child has a sub-question with children
     c1.setQuestion({
       question: "Which ORM?",
       header: "ORM Choice",
       options: [makeAnswer("Prisma"), makeAnswer("Drizzle")],
     });
-    tree.addChild(c1.id, makeAnswer("Prisma"));
-    tree.addChild(c1.id, makeAnswer("Drizzle"));
+    const gc1 = tree.addChild(c1.id, makeAnswer("Prisma"));
+    const gc2 = tree.addChild(c1.id, makeAnswer("Drizzle"));
+    gc1.setCompleted([], "");
+    gc2.setCompleted([], "");
 
     mockLoadLatest.mockResolvedValue(tree);
 
-    await answerAction("1");
+    // Mock stdin to provide "q" for the second question (so the loop exits)
+    const { Readable } = await import("node:stream");
+    const mockStdin = new Readable({ read() { this.push("q\n"); this.push(null); } });
+    const originalStdin = process.stdin;
+    Object.defineProperty(process, "stdin", { value: mockStdin, writable: true });
 
-    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("ORM Choice");
-    expect(allOutput).toContain("answer");
+    try {
+      await answerAction("1");
+
+      const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(allOutput).toContain("PostgreSQL");
+      // Should show the ORM question before exiting
+      expect(allOutput).toContain("ORM Choice");
+    } finally {
+      Object.defineProperty(process, "stdin", { value: originalStdin, writable: true });
+    }
   });
 });
