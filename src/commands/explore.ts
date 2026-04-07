@@ -133,7 +133,13 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
 
   // 6. Register activity callback for detailed events
   let lastProgressLine = "";
+  let lastOutputTime = Date.now();
   const toolUseThrottle = new Map<string, number>();
+
+  const printLine = (line: string) => {
+    console.error(line);
+    lastOutputTime = Date.now();
+  };
 
   orchestrator.onActivity((event: ActivityEvent) => {
     // Throttle tool_use events: max 1 per node per 3 seconds
@@ -144,8 +150,7 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
       toolUseThrottle.set(event.nodeId, now);
     }
 
-    const line = formatActivityLine(event, isSubscription);
-    console.error(line);
+    printLine(formatActivityLine(event, isSubscription));
   });
 
   // 7. Register progress callback for summary bar
@@ -165,9 +170,24 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
     // Only print if changed (avoid spamming identical lines)
     if (newLine !== lastProgressLine) {
       lastProgressLine = newLine;
-      console.error(newLine);
+      printLine(newLine);
     }
   });
+
+  // 7b. Heartbeat: print a "still working" line if no output for 30s
+  const heartbeat = setInterval(() => {
+    const silentMs = Date.now() - lastOutputTime;
+    if (silentMs >= 30_000) {
+      const tree = orchestrator.getTree();
+      const stats = tree?.getStats();
+      const running = stats?.runningNodes ?? 0;
+      const elapsed = formatElapsed(startTime);
+      const runningLabel = running > 0
+        ? `${running} node${running > 1 ? "s" : ""} working`
+        : "working";
+      printLine(chalk.dim(`        ... ${runningLabel} (${elapsed} elapsed) — Ctrl+C to stop`));
+    }
+  }, 30_000);
 
   // 8. Handle Ctrl+C gracefully
   let interrupted = false;
@@ -177,6 +197,7 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
       process.exit(1);
     }
     interrupted = true;
+    clearInterval(heartbeat);
     console.error("");
     console.error(chalk.yellow("Stopping exploration (saving progress)..."));
     console.error(chalk.dim("  Press Ctrl+C again to force quit"));
@@ -207,7 +228,8 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
   try {
     const tree = await orchestrator.explore(task, cwd);
 
-    // Remove SIGINT handler
+    // Cleanup handlers
+    clearInterval(heartbeat);
     process.removeAllListeners("SIGINT");
 
     // 10. Print final status
@@ -234,6 +256,7 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
       }
     }
   } catch (err: unknown) {
+    clearInterval(heartbeat);
     process.removeAllListeners("SIGINT");
     const msg = err instanceof Error ? err.message : String(err);
     console.error(chalk.red(`Exploration failed: ${msg}`));
