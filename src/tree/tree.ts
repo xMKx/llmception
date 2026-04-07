@@ -201,12 +201,16 @@ export class DecisionTree {
     let prunedNodes = 0;
     let questionedNodes = 0;
     let totalCostUsd = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
     let maxDepthReached = 0;
     let completedLeaves = 0;
 
     for (const node of this.nodes.values()) {
       totalNodes++;
       totalCostUsd += node.costUsd;
+      totalInputTokens += node.tokenUsage.inputTokens;
+      totalOutputTokens += node.tokenUsage.outputTokens;
       if (node.depth > maxDepthReached) {
         maxDepthReached = node.depth;
       }
@@ -243,6 +247,8 @@ export class DecisionTree {
       prunedNodes,
       questionedNodes,
       totalCostUsd,
+      totalInputTokens,
+      totalOutputTokens,
       maxDepthReached,
       completedLeaves,
     };

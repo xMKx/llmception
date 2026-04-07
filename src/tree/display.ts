@@ -42,6 +42,17 @@ function formatCost(usd: number, pricing?: PricingModel): string {
   return chalk.yellow(`$${usd.toFixed(4)}`);
 }
 
+/** Format a token count for display */
+function formatTokenCount(input: number, output: number): string {
+  const fmt = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return String(n);
+  };
+  const total = input + output;
+  return `${chalk.cyan(fmt(total))} total ${chalk.dim(`(${fmt(input)} input, ${fmt(output)} output)`)}`;
+}
+
 /** Truncate a string to maxLen characters with ellipsis */
 function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
@@ -131,11 +142,13 @@ export class TreeDisplay {
     );
     lines.push(`  Max depth: ${stats.maxDepthReached}`);
 
+    const tokenSummary = formatTokenCount(stats.totalInputTokens, stats.totalOutputTokens);
     if (pricing && pricing !== "metered") {
       lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)} ${chalk.dim("(subscription — no actual charge)")}`);
     } else {
       lines.push(`  Cost: ${formatCost(stats.totalCostUsd, pricing)}`);
     }
+    lines.push(`  Tokens: ${tokenSummary}`);
 
     if (stats.questionedNodes > 0) {
       lines.push(

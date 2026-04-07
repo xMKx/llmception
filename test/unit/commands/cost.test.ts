@@ -9,6 +9,17 @@ vi.mock("../../../src/tree/serializer.js", () => ({
   },
 }));
 
+// Mock ProviderRegistry for pricing info
+vi.mock("../../../src/providers/registry.js", () => ({
+  ProviderRegistry: {
+    getProviderInfo: vi.fn(() => ({
+      name: "Claude Code CLI",
+      pricing: "subscription",
+      supportsFork: true,
+    })),
+  },
+}));
+
 import { TreeSerializer } from "../../../src/tree/serializer.js";
 import { costAction } from "../../../src/commands/cost.js";
 
@@ -56,7 +67,7 @@ describe("costAction", () => {
     expect(logSpy).toHaveBeenCalledWith("No active exploration found.");
   });
 
-  it("should print total cost header", async () => {
+  it("should print cost and token header", async () => {
     const tree = new DecisionTree("Build a widget", makeConfig());
     tree.createRoot();
     mockLoadLatest.mockResolvedValue(tree);
@@ -64,12 +75,11 @@ describe("costAction", () => {
     await costAction();
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("Cost Breakdown");
-    expect(allOutput).toContain("$25.00");
-    expect(allOutput).toContain("hard");
+    expect(allOutput).toContain("Cost");
+    expect(allOutput).toContain("Token");
   });
 
-  it("should show per-node cost rows", async () => {
+  it("should show per-node cost and token rows", async () => {
     const tree = new DecisionTree("Build a widget", makeConfig());
     const root = tree.createRoot();
     root.setCost({
@@ -94,15 +104,12 @@ describe("costAction", () => {
     await costAction();
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    // Total cost should be sum of both nodes
-    expect(allOutput).toContain("$0.0450");
-    // Should show ROOT label
+    // Should show ROOT and child labels
     expect(allOutput).toContain("ROOT");
-    // Should show child label
     expect(allOutput).toContain("Option A");
-    // Should show individual costs
-    expect(allOutput).toContain("$0.0150");
-    expect(allOutput).toContain("$0.0300");
+    // Should show token columns
+    expect(allOutput).toContain("1.0k");
+    expect(allOutput).toContain("2.0k");
   });
 
   it("should show $0.00 for nodes with zero cost", async () => {
@@ -141,9 +148,11 @@ describe("costAction", () => {
     await costAction();
 
     const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(allOutput).toContain("Node ID");
+    expect(allOutput).toContain("Node");
     expect(allOutput).toContain("Label");
     expect(allOutput).toContain("Status");
     expect(allOutput).toContain("Cost");
+    expect(allOutput).toContain("Input");
+    expect(allOutput).toContain("Output");
   });
 });

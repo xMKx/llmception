@@ -50,6 +50,7 @@ async function main(): Promise<void> {
     .option("--provider <type>", "override provider")
     .option("--concurrency <n>", "override concurrency")
     .option("--node-budget <n>", "override node budget")
+    .option("--answer <value>", "pre-answer questions (by index or label substring, repeatable)", (val: string, prev: string[]) => [...prev, val], [] as string[])
     .action(exploreAction);
 
   // status

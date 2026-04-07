@@ -2,7 +2,9 @@ import type { LlmceptionConfig, PricingModel, ProviderType } from "../types.js";
 import { loadConfig, mergeConfigs, validateConfig } from "../config/schema.js";
 import { Orchestrator } from "../runner/orchestrator.js";
 import type { ActivityEvent } from "../runner/orchestrator.js";
+import { DecisionTree } from "../tree/tree.js";
 import { TreeDisplay } from "../tree/display.js";
+import { TreePruner } from "../tree/pruner.js";
 import { TreeSerializer } from "../tree/serializer.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import chalk from "chalk";
@@ -15,6 +17,7 @@ export interface ExploreOpts {
   provider?: string;
   concurrency?: string;
   nodeBudget?: string;
+  answer?: string[];
 }
 
 /**
@@ -68,6 +71,15 @@ function formatCostLabel(costUsd: number, isSubscription: boolean): string {
     return chalk.dim(`~$${costUsd.toFixed(2)} equiv.`);
   }
   return chalk.yellow(`$${costUsd.toFixed(4)}`);
+}
+
+function formatTokens(input: number, output: number): string {
+  const fmt = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return String(n);
+  };
+  return `${fmt(input)} in / ${fmt(output)} out`;
 }
 
 function formatActivityLine(event: ActivityEvent, isSubscription: boolean): string {
@@ -164,8 +176,9 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
     if (stats.failedNodes > 0) parts.push(chalk.red(`${stats.failedNodes} failed`));
 
     const costStr = formatCostLabel(stats.totalCostUsd, isSubscription);
+    const tokenStr = chalk.dim(formatTokens(stats.totalInputTokens, stats.totalOutputTokens));
     const elapsed = formatElapsed(startTime);
-    const newLine = `${chalk.dim("---")} ${parts.join(chalk.dim(" | "))} ${chalk.dim("| cost:")} ${costStr} ${chalk.dim(`| ${elapsed}`)}`;
+    const newLine = `${chalk.dim("---")} ${parts.join(chalk.dim(" | "))} ${chalk.dim("|")} ${costStr} ${chalk.dim("|")} ${tokenStr} ${chalk.dim(`| ${elapsed}`)}`;
 
     // Only print if changed (avoid spamming identical lines)
     if (newLine !== lastProgressLine) {
@@ -232,7 +245,12 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
     clearInterval(heartbeat);
     process.removeAllListeners("SIGINT");
 
-    // 10. Print final status
+    // 10. Auto-answer pre-specified answers
+    if (opts.answer && opts.answer.length > 0) {
+      await autoAnswerQuestions(tree, opts.answer, cwd);
+    }
+
+    // 11. Print final status
     const elapsed = formatElapsed(startTime);
     console.error("");
     console.error(chalk.green.bold(`Exploration complete`) + chalk.dim(` (${elapsed})`));
@@ -269,4 +287,48 @@ export async function exploreAction(task: string, opts: ExploreOpts): Promise<vo
 
     process.exitCode = 1;
   }
+}
+
+/**
+ * Auto-answer questions using pre-specified answers.
+ * Matches by 1-based index number or case-insensitive substring of option label.
+ */
+async function autoAnswerQuestions(tree: DecisionTree, answers: string[], cwd: string): Promise<void> {
+  for (const answerStr of answers) {
+    const q = tree.getFirstUnresolvedQuestion();
+    if (!q) {
+      console.error(chalk.dim(`  No more questions to auto-answer (skipping "${answerStr}")`));
+      break;
+    }
+
+    const options = q.question.options;
+    let chosenIndex = -1;
+
+    // Try as 1-based index first
+    const asNum = parseInt(answerStr, 10);
+    if (!Number.isNaN(asNum) && asNum >= 1 && asNum <= options.length) {
+      chosenIndex = asNum - 1;
+    } else {
+      // Try case-insensitive substring match on labels
+      const lower = answerStr.toLowerCase();
+      chosenIndex = options.findIndex(
+        (o) => o.label.toLowerCase().includes(lower),
+      );
+    }
+
+    if (chosenIndex === -1 || chosenIndex >= q.node.childIds.length) {
+      console.error(chalk.yellow(`  Could not match answer "${answerStr}" to any option for: ${q.question.header}`));
+      console.error(chalk.dim(`  Available: ${options.map((o, i) => `[${i + 1}] ${o.label}`).join(", ")}`));
+      break;
+    }
+
+    const chosenChildId = q.node.childIds[chosenIndex];
+    const pruner = new TreePruner(tree);
+    const pruned = pruner.pruneByAnswer(q.node.id, chosenChildId);
+    q.node.setStatus("forking");
+
+    console.error(chalk.cyan(`  Auto-answered: "${q.question.header}" -> ${options[chosenIndex].label} (pruned ${pruned.length} nodes)`));
+  }
+
+  await TreeSerializer.save(tree, cwd);
 }

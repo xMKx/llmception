@@ -205,6 +205,8 @@ export interface TreeStats {
   prunedNodes: number;
   questionedNodes: number;
   totalCostUsd: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
   maxDepthReached: number;
   completedLeaves: number;
 }
