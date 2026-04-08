@@ -14,6 +14,7 @@ export const DEFAULT_CONFIG: LlmceptionConfig = {
   branchTimeoutMs: 300_000,
   model: "sonnet",
   permissionMode: "bypassPermissions",
+  maxRetries: 3,
   claudeCodePath: "claude",
   providers: {},
 };

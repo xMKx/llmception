@@ -38,6 +38,7 @@ function createNodeState(
     error: null,
     filesChanged: [],
     diffStat: null,
+    retryCount: 0,
     ...overrides,
   };
 }

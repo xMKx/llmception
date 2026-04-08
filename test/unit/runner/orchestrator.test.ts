@@ -54,6 +54,7 @@ function makeConfig(
     branchTimeoutMs: 60000,
     model: "sonnet",
     permissionMode: "auto",
+    maxRetries: 0,
     claudeCodePath: "claude",
     providers: {},
     ...overrides,
@@ -303,14 +304,14 @@ describe("Orchestrator", () => {
   });
 
   describe("error handling", () => {
-    it("should mark node as failed on error event", async () => {
+    it("should mark node as failed on error event when maxRetries=0", async () => {
       const events: StreamEvent[] = [
         { type: "init", sessionId: "sess-root" },
         { type: "error", message: "Something exploded" },
       ];
 
       mockProvider = createMockProvider(events);
-      const config = makeConfig();
+      const config = makeConfig({ maxRetries: 0 });
       const orchestrator = new Orchestrator(config);
 
       const tree = await orchestrator.explore("Failing task", "/tmp/repo");
@@ -319,6 +320,78 @@ describe("Orchestrator", () => {
       expect(root.status).toBe("failed");
       expect(root.error).toBe("Something exploded");
     });
+
+    it("should retry and succeed after transient failure", async () => {
+      let callCount = 0;
+      mockProvider = {
+        name: "mock",
+        type: "claude-cli",
+        pricing: "subscription",
+        supportsFork: true,
+        async *execute() {
+          callCount++;
+          if (callCount === 1) {
+            yield { type: "init" as const, sessionId: "sess-fail" };
+            yield { type: "error" as const, message: "Transient failure" };
+          } else {
+            yield { type: "init" as const, sessionId: "sess-ok" };
+            yield { type: "text" as const, text: "Done" };
+            yield {
+              type: "result" as const,
+              costUsd: 0.01,
+              sessionId: "sess-ok",
+              tokenUsage: makeTokenUsage(0.01),
+            };
+          }
+        },
+        async *fork() {
+          yield { type: "init" as const, sessionId: "fork-ok" };
+          yield {
+            type: "result" as const,
+            costUsd: 0.005,
+            sessionId: "fork-ok",
+            tokenUsage: makeTokenUsage(0.005),
+          };
+        },
+      };
+
+      const config = makeConfig({ maxRetries: 2 });
+      const orchestrator = new Orchestrator(config);
+
+      const tree = await orchestrator.explore("Retry task", "/tmp/repo");
+
+      const root = tree.getRootNode();
+      expect(root.status).toBe("completed");
+      expect(root.retryCount).toBe(1);
+      expect(callCount).toBe(2);
+    }, 15_000);
+
+    it("should fail permanently after exhausting retries", async () => {
+      mockProvider = {
+        name: "mock",
+        type: "claude-cli",
+        pricing: "subscription",
+        supportsFork: true,
+        async *execute() {
+          yield { type: "init" as const, sessionId: "sess-fail" };
+          yield { type: "error" as const, message: "Persistent failure" };
+        },
+        async *fork() {
+          yield { type: "init" as const, sessionId: "fork-fail" };
+          yield { type: "error" as const, message: "Persistent failure" };
+        },
+      };
+
+      const config = makeConfig({ maxRetries: 1 });
+      const orchestrator = new Orchestrator(config);
+
+      const tree = await orchestrator.explore("Doomed task", "/tmp/repo");
+
+      const root = tree.getRootNode();
+      expect(root.status).toBe("failed");
+      expect(root.error).toBe("Persistent failure");
+      expect(root.retryCount).toBe(1);
+    }, 15_000);
   });
 
   describe("progress callbacks", () => {

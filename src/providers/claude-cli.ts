@@ -133,8 +133,13 @@ export class ClaudeCliProvider implements ExecutionProvider {
     this.activeProcess = null;
 
     if (exitCode !== 0) {
-      const errorMsg = stderrBuf.trim() || `Process exited with code ${exitCode}`;
-      logger.warn(`Claude CLI exited with code ${exitCode}: ${errorMsg.slice(0, 200)}`);
+      const stderr = stderrBuf.trim();
+      const errorMsg = stderr || `Process exited with code ${exitCode}`;
+      // Log full stderr for debugging (truncated only in user-facing events)
+      logger.warn(`Claude CLI exited with code ${exitCode}`);
+      if (stderr) {
+        logger.debug(`Claude CLI stderr:\n${stderr}`);
+      }
       yield { type: "error", message: errorMsg };
     }
   }

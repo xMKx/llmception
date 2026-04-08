@@ -58,6 +58,8 @@ export class Orchestrator {
   private nodeText: Map<string, string> = new Map();
   /** Track which nodes have pending work remaining */
   private pendingNodes: Set<string> = new Set();
+  /** Nodes currently in retry-delay (waiting for setTimeout to fire) */
+  private retryingNodes: Set<string> = new Set();
   /** Resolve function for the main exploration promise */
   private resolveExplore: (() => void) | null = null;
 
@@ -93,6 +95,9 @@ export class Orchestrator {
     if (this.pool) {
       this.pool.stop();
     }
+    // Clear pending/retrying state so timers don't revive nodes after stop
+    this.pendingNodes.clear();
+    this.retryingNodes.clear();
     if (this.tree) {
       await TreeSerializer.save(this.tree, cwd);
     }
@@ -314,17 +319,93 @@ export class Orchestrator {
   }
 
   private handleError(node: TreeNode, message: string): void {
-    logger.error(`[Node ${node.id}] Error: ${message}`);
+    const maxRetries = this.config.maxRetries ?? 3;
+    const attempt = node.retryCount;
+
+    if (attempt < maxRetries) {
+      // Retry with exponential backoff: 2s, 4s, 8s
+      const delayMs = Math.min(2000 * Math.pow(2, attempt), 30_000);
+      logger.warn(
+        `[Node ${node.id}] Error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delayMs}ms: ${message.slice(0, 200)}`,
+      );
+      this.emitActivity({
+        type: "node_failed",
+        nodeId: node.id,
+        label: this.getNodeLabel(node),
+        detail: `Retry ${attempt + 1}/${maxRetries} in ${(delayMs / 1000).toFixed(0)}s: ${message.slice(0, 100)}`,
+      });
+
+      node.resetForRetry();
+      this.retryingNodes.add(node.id);
+
+      setTimeout(() => {
+        this.retryingNodes.delete(node.id);
+        // If the pool was stopped while we were waiting, give up
+        if (!this.pendingNodes.has(node.id)) {
+          node.setFailed(message);
+          this.emitProgress();
+          this.checkDone();
+          return;
+        }
+        this.retryNode(node);
+      }, delayMs);
+
+      return;
+    }
+
+    // Exhausted retries — mark as permanently failed
+    logger.error(`[Node ${node.id}] Error (all ${maxRetries} retries exhausted): ${message}`);
     this.emitActivity({
       type: "node_failed",
       nodeId: node.id,
       label: this.getNodeLabel(node),
-      detail: message,
+      detail: `Failed after ${maxRetries} retries: ${message.slice(0, 100)}`,
     });
     node.setFailed(message);
     this.pendingNodes.delete(node.id);
     this.emitProgress();
     this.checkDone();
+  }
+
+  /**
+   * Resubmit a failed node to the pool for another attempt.
+   */
+  private retryNode(node: TreeNode): void {
+    const processId = `proc-${node.id}-retry${node.retryCount}`;
+    this.processNodeMap.set(processId, node.id);
+    this.nodeText.set(node.id, "");
+
+    const systemPrompt = ContextBuilder.buildSystemPrompt();
+    const cwd = node.worktreePath ?? this.worktreeManager.getRepoRoot();
+
+    // Rebuild the same opts that were used to originally start this node
+    if (node.depth === 0) {
+      // Root node — fresh execute
+      const executeOpts: ExecuteOpts = {
+        prompt: this.tree.getTask(),
+        cwd,
+        systemPrompt,
+        model: this.config.model,
+      };
+      this.pool.submit(processId, executeOpts, false);
+    } else {
+      // Child node — rebuild context from decision path
+      const task = this.tree.getTask();
+      const fullPrompt = ContextBuilder.buildFullPrompt(
+        task,
+        [...node.decisionPath],
+      );
+
+      const executeOpts: ExecuteOpts = {
+        prompt: fullPrompt,
+        cwd,
+        systemPrompt,
+        model: this.config.model,
+      };
+      this.pool.submit(processId, executeOpts, false);
+    }
+
+    this.emitProgress();
   }
 
   /**
@@ -543,13 +624,15 @@ export class Orchestrator {
     const nodeId = this.processNodeMap.get(processId);
     if (!nodeId) return;
 
+    // Skip if this node is already waiting for a retry timer
+    if (this.retryingNodes.has(nodeId)) return;
+
     // If the node is still marked as running (no result/error event came),
-    // treat it as a failure
+    // treat it as a retryable failure
     const node = this.tree.getNode(nodeId);
     if (node && node.status === "running") {
-      node.setFailed("Process ended without result");
-      this.pendingNodes.delete(nodeId);
-      this.emitProgress();
+      this.handleError(node, "Process ended without result");
+      return;
     }
 
     this.checkDone();
@@ -561,6 +644,7 @@ export class Orchestrator {
   private checkDone(): void {
     if (
       this.pendingNodes.size === 0 &&
+      this.retryingNodes.size === 0 &&
       this.pool.getRunningCount() === 0 &&
       this.pool.getPendingCount() === 0
     ) {

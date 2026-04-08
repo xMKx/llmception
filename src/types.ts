@@ -85,6 +85,8 @@ export interface LlmceptionConfig {
   permissionMode: "auto" | "acceptEdits" | "bypassPermissions";
   /** Path to Claude Code executable */
   claudeCodePath: string;
+  /** Max retries per node on transient failure (0 = no retries) */
+  maxRetries: number;
   /** Provider-specific configs */
   providers: Partial<Record<ProviderType, ProviderConfig>>;
 }
@@ -129,6 +131,8 @@ export interface TreeNodeState {
   filesChanged: string[];
   /** Diff stat summary (e.g. "+342/-0  8 files") */
   diffStat: string | null;
+  /** Number of times this node has been retried */
+  retryCount: number;
 }
 
 /** A single step in the decision path */

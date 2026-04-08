@@ -108,14 +108,58 @@ export async function answerAction(option?: string): Promise<void> {
       continue;
     }
 
-    // 6. Prune siblings
+    // 6. Check if chosen branch has any completed work before pruning
     const chosenChild = tree.getNode(chosenChildId);
+    const chosenLabel = chosenChild?.answer?.label ?? answerStr;
+
+    if (chosenChild) {
+      const hasCompletedLeaf = hasCompletedDescendant(chosenChild, tree);
+      if (!hasCompletedLeaf && !chosenChild.isComplete()) {
+        // All nodes in this branch failed — warn the user
+        const failedCount = countFailedDescendants(chosenChild, tree);
+        console.log(chalk.yellow(
+          `  Warning: "${chosenLabel}" has no completed implementations (${failedCount} failed node${failedCount !== 1 ? "s" : ""}).`,
+        ));
+        console.log(chalk.yellow(
+          `  Choosing this will leave you with no results to apply.`,
+        ));
+
+        const confirm = await prompt(chalk.bold("  Continue anyway? (y/n): "));
+        if (confirm.toLowerCase() !== "y" && confirm.toLowerCase() !== "yes") {
+          console.log(chalk.dim("  Skipped. Pick a different option or re-explore."));
+          console.log("");
+          continue;
+        }
+      }
+    }
+
+    // Prune siblings
     const pruner = new TreePruner(tree);
     const pruned = pruner.pruneByAnswer(firstQ.node.id, chosenChildId);
-    console.log(chalk.green(`  Chose: "${chosenChild?.answer?.label ?? answerStr}" (pruned ${pruned.length} branch${pruned.length !== 1 ? "es" : ""})`));
+    console.log(chalk.green(`  Chose: "${chosenLabel}" (pruned ${pruned.length} branch${pruned.length !== 1 ? "es" : ""})`));
     console.log("");
 
     // 7. Save after each answer
     await TreeSerializer.save(tree, cwd);
   }
+}
+
+/** Check if a node or any of its descendants has completed */
+function hasCompletedDescendant(node: TreeNode, tree: DecisionTree): boolean {
+  if (node.isComplete()) return true;
+  for (const childId of node.childIds) {
+    const child = tree.getNode(childId);
+    if (child && hasCompletedDescendant(child, tree)) return true;
+  }
+  return false;
+}
+
+/** Count failed nodes in a subtree */
+function countFailedDescendants(node: TreeNode, tree: DecisionTree): number {
+  let count = node.status === "failed" ? 1 : 0;
+  for (const childId of node.childIds) {
+    const child = tree.getNode(childId);
+    if (child) count += countFailedDescendants(child, tree);
+  }
+  return count;
 }

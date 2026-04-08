@@ -59,6 +59,10 @@ describe("DEFAULT_CONFIG", () => {
     expect(DEFAULT_CONFIG.claudeCodePath).toBe("claude");
   });
 
+  it("should have maxRetries of 3", () => {
+    expect(DEFAULT_CONFIG.maxRetries).toBe(3);
+  });
+
   it("should have empty providers", () => {
     expect(DEFAULT_CONFIG.providers).toEqual({});
   });

@@ -91,6 +91,11 @@ export class TreeNode {
     return this.state.error;
   }
 
+  /** Number of times this node has been retried */
+  get retryCount(): number {
+    return this.state.retryCount ?? 0;
+  }
+
   /** Files changed by this node's execution */
   get filesChanged(): readonly string[] {
     return this.state.filesChanged;
@@ -165,6 +170,14 @@ export class TreeNode {
     this.state.error = error;
     this.state.status = "failed";
     this.state.finishedAt = new Date().toISOString();
+  }
+
+  /** Reset a failed node back to running for a retry attempt */
+  resetForRetry(): void {
+    this.state.retryCount = (this.state.retryCount ?? 0) + 1;
+    this.state.status = "running";
+    this.state.error = null;
+    this.state.finishedAt = null;
   }
 
   /** Set cost and token usage */
